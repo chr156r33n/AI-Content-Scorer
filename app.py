@@ -5,7 +5,7 @@ import numpy as np
 import streamlit as st
 
 # ---------------- Config ----------------
-MIN_WINDOW_BORDER_SCORE = 0.05
+MIN_WINDOW_BORDER_SCORE = 0.0  # border visible only if score >= this; badges always shown
 
 # ---- Fast, torch-free embeddings ----
 from fastembed import TextEmbedding
@@ -84,7 +84,7 @@ def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-e
     """
     Returns:
       overlap_len (float),
-      window_scores: list of (start, end, max_sim, contributing_queries[(q_idx, query, score), ...]),
+      window_scores: list of (start, end, max_sim, contributing_queries[(q_idx, query, score), ...], render_flag),
       sims (Q x W),
       q_labels, w_labels
     """
@@ -116,7 +116,6 @@ def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-e
                     if max_score > 0 and qscore >= max_score * 0.8:
                         contributing.append((j, q, float(qscore)))
         contributing.sort(key=lambda x: x[2], reverse=True)
-        # Add a render flag (badge always shown; border depends on score threshold)
         render_flag = float(max_score) >= MIN_WINDOW_BORDER_SCORE
         window_scores.append((span[0], span[1], float(max_score), contributing, render_flag))
 
@@ -125,12 +124,22 @@ def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-e
     return overlap_len, window_scores, sims, q_labels, w_labels
 
 # ----------------- Visual rendering -----------------
-def color_for_score(v: float) -> str:
-    """Dotted red border; thickness scales with score."""
-    v = max(0.0, min(1.0, v))
+WINDOW_PALETTE = [
+    "#e53935", "#1e88e5", "#43a047", "#fb8c00", "#8e24aa",
+    "#00897b", "#6d4c41", "#3949ab", "#c0ca33", "#f4511e"
+]
+
+def color_for_window(win_idx: int, score: float) -> str:
+    """Dotted border style per-window with thickness by score."""
+    c = WINDOW_PALETTE[win_idx % len(WINDOW_PALETTE)]
+    v = max(0.0, min(1.0, score))
     width = max(1, int(round(v * 3)))   # 1–3px
     alpha = max(0.35, min(1.0, v))
-    return f"border: {width}px dotted rgba(255,0,0,{alpha:.2f}); padding: 2px 3px; border-radius: 2px;"
+    return (
+        f"border: {width}px dotted {c};"
+        f"padding: 2px 3px; border-radius: 2px;"
+        f"opacity: {alpha:.2f};"
+    )
 
 def get_unique_words(text: str) -> set:
     """Unique content words: non-stop, >=3 chars, appear exactly once (lowercased)."""
@@ -149,11 +158,11 @@ def get_unique_word_spans(passage: str, unique_words: set) -> list[tuple[int,int
 
 def render_highlighted(passage: str, window_scores: List[Tuple[int,int,float,list,bool]]) -> str:
     """
-    Event-based renderer:
-      - Red dotted borders around each window span (supports nesting/overlap)
-      - Green bold for unique words (applies everywhere)
-      - Badges: tiny score at open, detailed score (+top queries) at close
-      - Borders are visible only if score >= MIN_WINDOW_BORDER_SCORE; badges always appear
+    ID-aware renderer (handles overlapping & crossing windows):
+      - Each window has a unique color (stable by index in window_scores).
+      - Tiny score badge at open; detailed badge (+top queries) at close.
+      - Green bold for unique words everywhere (inside/outside windows).
+      - Borders shown only if score >= MIN_WINDOW_BORDER_SCORE; badges always shown.
     """
     if not passage:
         return ""
@@ -161,46 +170,58 @@ def render_highlighted(passage: str, window_scores: List[Tuple[int,int,float,lis
     unique_words = get_unique_words(passage)
     uniq_spans    = get_unique_word_spans(passage, unique_words)
 
-    # Build events map
-    opens  = defaultdict(list)
-    closes = defaultdict(list)
+    # Build events with stable window IDs
+    opens, closes = defaultdict(list), defaultdict(list)
+    win_meta = {}  # wid -> dict(score, contrib, render, style)
 
-    # Windows
-    for (start, end, score, contrib, render_flag) in window_scores:
-        start = max(0, min(len(passage), start))
-        end   = max(0, min(len(passage), end))
+    for wid, ws in enumerate(window_scores):
+        start, end, score, contrib, render_flag = ws
+        start = max(0, min(len(passage), int(start)))
+        end   = max(0, min(len(passage), int(end)))
         if end <= start:
             continue
-        opens[start].append({"type": "win", "score": float(score), "contrib": contrib, "render": bool(render_flag)})
-        closes[end].append({"type": "win", "score": float(score), "contrib": contrib, "render": bool(render_flag)})
+        style = color_for_window(wid, float(score)) if render_flag else "padding:0;"
+        win_meta[wid] = {"score": float(score), "contrib": contrib, "render": bool(render_flag), "style": style}
+        opens[start].append({"type":"win", "id": wid})
+        closes[end].append({"type":"win", "id": wid})
 
-    # Uniques
+    # Unique word events
     for (s, e) in uniq_spans:
-        opens[s].append({"type": "uniq"})
-        closes[e].append({"type": "uniq"})
+        opens[s].append({"type":"uniq"})
+        closes[e].append({"type":"uniq"})
 
     boundaries = sorted(set([0, len(passage)] + list(opens.keys()) + list(closes.keys())))
-    out = []
-    pos = 0
-    stack = []  # each item: {"type":"win"/"uniq", ...}
+    out, pos = [], 0
+    active_win_ids = []   # track exact active windows (order of opening)
+    uniq_depth = 0
 
-    def open_win(score: float, render: bool):
-        # tiny badge at the start edge (so you see multiple overlapping windows)
+    def open_win(wid: int):
+        meta = win_meta[wid]
+        score = meta["score"]
         out.append(f"<sup style='font-size:0.65em; color:#888'>{score:.2f}</sup>")
-        style = color_for_score(score) if render else "padding: 0;"
-        out.append(f"<span style='{style}'>")
+        out.append(f"<span data-win='{wid}' style='{meta['style']}'>")
+        active_win_ids.append(wid)
 
-    def close_win(score: float, contrib, render: bool):
-        parts = [f"Q{qi+1}:{qs:.2f}" for (qi, _q, qs) in (contrib[:2] if contrib else [])]
-        badge = f" ({score:.2f}" + (f" | {' | '.join(parts)}" if parts else "") + ")"
-        out.append(f"<sup style='font-size:0.7em; color:#666'>{html.escape(badge)}</sup>")
-        out.append("</span>")
+    def close_win(wid: int):
+        if wid in active_win_ids:
+            meta = win_meta[wid]
+            score, contrib = meta["score"], meta["contrib"]
+            parts = [f"Q{qi+1}:{qs:.2f}" for (qi, _q, qs) in (contrib[:2] if contrib else [])]
+            badge = f" ({score:.2f}" + (f" | {' | '.join(parts)}" if parts else "") + ")"
+            out.append(f"<sup style='font-size:0.7em; color:#666'>{html.escape(badge)}</sup>")
+            out.append("</span>")
+            active_win_ids.remove(wid)
 
     def open_uniq():
+        nonlocal uniq_depth
         out.append("<span style='color:green; font-weight:600'>")
+        uniq_depth += 1
 
     def close_uniq():
-        out.append("</span>")
+        nonlocal uniq_depth
+        if uniq_depth > 0:
+            uniq_depth -= 1
+            out.append("</span>")
 
     for b in boundaries:
         # Emit plain text between last boundary and this boundary
@@ -208,39 +229,38 @@ def render_highlighted(passage: str, window_scores: List[Tuple[int,int,float,lis
             out.append(html.escape(passage[pos:b]))
             pos = b
 
-        # Close inner elements first: uniques, then windows
+        # Close events at this boundary
         if b in closes:
+            # Close unique spans first (innermost)
             for _ in [e for e in closes[b] if e["type"] == "uniq"]:
-                for i in range(len(stack)-1, -1, -1):
-                    if stack[i]["type"] == "uniq":
-                        stack.pop(i); close_uniq(); break
-            for _ in [e for e in closes[b] if e["type"] == "win"]:
-                for i in range(len(stack)-1, -1, -1):
-                    if stack[i]["type"] == "win":
-                        win = stack.pop(i); close_win(win["score"], win.get("contrib"), win.get("render", True)); break
+                close_uniq()
+            # Close each window that *ends here* by exact id (handles crossing)
+            for ev in [e for e in closes[b] if e["type"] == "win"]:
+                close_win(ev["id"])
 
-        # Open windows (outermost by descending score), then uniques
+        # Open events at this boundary
         if b in opens:
+            # Open windows first (outer), sorted by score desc to put stronger outside
             for ev in sorted([e for e in opens[b] if e["type"] == "win"],
-                             key=lambda d: d["score"], reverse=True):
-                open_win(ev["score"], ev["render"]); stack.append(ev)
+                             key=lambda e: win_meta[e["id"]]["score"],
+                             reverse=True):
+                open_win(ev["id"])
+            # Then open unique spans (inner)
             for ev in [e for e in opens[b] if e["type"] == "uniq"]:
-                open_uniq(); stack.append(ev)
+                open_uniq()
 
-    # Safety close
-    while stack:
-        ev = stack.pop()
-        if ev["type"] == "uniq":
-            close_uniq()
-        else:
-            close_win(ev["score"], ev.get("contrib"), ev.get("render", True))
+    # Safety close (should be empty)
+    for wid in list(active_win_ids)[::-1]:
+        close_win(wid)
+    while uniq_depth > 0:
+        close_uniq()
 
     return "".join(out)
 
 # ----------------- UI -----------------
 st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
 st.title("Semantic Overlap & Density — FastEmbed (no Torch)")
-st.caption("CPU-only ONNX embeddings with clean visual annotations (windows + unique words).")
+st.caption("CPU-only ONNX embeddings with clear annotations: per-window colors, unique-word highlights, legend & summary.")
 
 with st.sidebar:
     model_name = st.selectbox(
@@ -252,8 +272,7 @@ with st.sidebar:
     stride   = st.slider("Window stride", 1, 6, 2)
     border_thresh = st.slider("Window border threshold", 0.0, 1.0, float(MIN_WINDOW_BORDER_SCORE), 0.05,
                               help="Borders show only if score ≥ threshold. Badges always show.")
-    # reflect slider in runtime without restart
-    MIN_WINDOW_BORDER_SCORE = border_thresh
+    MIN_WINDOW_BORDER_SCORE = border_thresh  # reflect live
 
 colA, colB = st.columns([1,1])
 with colA:
@@ -281,13 +300,12 @@ if st.button("Score Passage"):
         ov_len, win_scores, sims, q_labels, w_labels = overlap_embed(
             passage, queries, model_name=model_name, win_size=win_size, stride=stride
         )
-        # Note: win_scores already include the render flag; threshold is handled there
         final = geometric_mean([gzip_norm, semu_norm, ov_len])
 
     # Metrics
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Gzip (density, norm)", f"{gzip_norm:.2f}")
-    m2.metric("Semantic Uniques (norm)", f"{semu_norm:.2f}")
+    m2.metric("Semantic Uniques (norm)", f"{semun_norm:.2f}")
     m3.metric("Overlap (relevance)",    f"{ov_len:.2f}")
     m4.metric("Content Balance Score",  f"{final:.2f}")
 
@@ -303,8 +321,31 @@ if st.button("Score Passage"):
         unsafe_allow_html=True
     )
 
+    # ---- Legend & written summary ----
+    st.markdown("### Legend")
+    legend_cols = st.columns(min(4, max(1, len(win_scores))))
+    for i, ws in enumerate(win_scores):
+        _, _, score, contrib, render_flag = ws
+        color = WINDOW_PALETTE[i % len(WINDOW_PALETTE)]
+        with legend_cols[i % len(legend_cols)]:
+            st.markdown(
+                f"<div style='display:inline-block;width:14px;height:14px;background:{color};"
+                f"border-radius:2px;margin-right:8px;vertical-align:middle;'></div>"
+                f"<span><b>W{i+1}</b> (score {score:.2f})</span>",
+                unsafe_allow_html=True
+            )
+
+    st.markdown("### Query Key")
+    st.markdown(", ".join([f"**Q{i+1}**: {q}" for i, q in enumerate(queries)]) or "_No queries_")
+
+    st.markdown("### Window Summary")
+    for i, ws in enumerate(win_scores):
+        start, end, score, contrib, render_flag = ws
+        top = ", ".join([f"Q{qi+1} {qs:.2f}" for (qi, _q, qs) in (contrib[:3] if contrib else [])]) or "—"
+        st.write(f"**W{i+1}** [{start}:{end}] • score **{score:.2f}** • top queries: {top}")
+
     with st.expander("Details"):
         st.write(f"Raw gzip ratio: {gr:.4f}")
         st.write(f"Tokens: {tok_count} | Content tokens: {ctok_count} | Unique content tokens (≥3): {uniq_count}")
-        st.write("Window spans (char offsets) with max-overlap score & top queries (and render flag):")
+        st.write("Window tuples (start, end, score, top queries (idx, text, score), render_flag):")
         st.write(win_scores)
