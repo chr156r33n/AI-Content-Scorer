@@ -670,29 +670,97 @@ if st.button("Score Passage"):
         for (s, e, txt) in sents:
             m = sentence_metrics(txt, queries, model_name=model_name)
             chips.append((txt, m))
+        # Get previous scores with error handling
         prev = st.session_state.get("prev_sentence_scores", {})
+        if not isinstance(prev, dict):
+            prev = {}
+            st.session_state["prev_sentence_scores"] = prev
+        
         curr = {}
+        delta_count = 0
+        
         for txt, m in chips:
+            # Create stable hash key for sentence
             key = hashlib.md5(txt.encode("utf-8")).hexdigest()
             curr[key] = m
+            
+            # Get previous metrics for this sentence
             d = prev.get(key, None)
+            has_previous = d is not None
+            
             def fmt(val): return f"{val:.2f}"
             def delta(curr, prev): 
                 return f"{(curr - prev):+0.02f}" if prev is not None else "—"
+            
+            # Calculate deltas safely
             density = fmt(m["density"]); d_d = delta(m["density"], d["density"]) if d else "—"
             uniq    = fmt(m["uniques"]); d_u = delta(m["uniques"], d["uniques"]) if d else "—"
             ov      = fmt(m["overlap"]); d_o = delta(m["overlap"], d["overlap"]) if d else "—"
+            
+            # Count how many sentences have deltas
+            if has_previous:
+                delta_count += 1
+            
+            # Color code the delta display
+            delta_color = "#28a745" if has_previous else "#6c757d"  # green if has delta, gray if new
+            
             st.markdown(
                 f"<div style='margin:4px 0; padding:6px 8px; border:1px solid #eee; border-radius:6px;'>"
                 f"<div style='font-size:0.95rem; margin-bottom:4px'>{html.escape(txt)}</div>"
                 f"<div style='font-size:0.85rem; color:#444'>"
-                f"Overlap <b>{ov}</b> (<span style='color:#666'>{d_o}</span>) • "
-                f"Uniques <b>{uniq}</b> (<span style='color:#666'>{d_u}</span>) • "
-                f"Density <b>{density}</b> (<span style='color:#666'>{d_d}</span>)"
+                f"Overlap <b>{ov}</b> (<span style='color:{delta_color}'>{d_o}</span>) • "
+                f"Uniques <b>{uniq}</b> (<span style='color:{delta_color}'>{d_u}</span>) • "
+                f"Density <b>{density}</b> (<span style='color:{delta_color}'>{d_d}</span>)"
                 f"</div></div>",
                 unsafe_allow_html=True
             )
+        
+        # Store current scores for next run
         st.session_state["prev_sentence_scores"] = curr
+        
+        # Show cache status
+        total_sentences = len(chips)
+        if delta_count > 0:
+            st.info(f"📊 Cache working: {delta_count}/{total_sentences} sentences have delta values from previous run")
+        else:
+            st.info(f"🆕 First run: {total_sentences} sentences (no previous data to compare)")
+    # --- Debug: Cache Status ---
+    if st.checkbox('🔍 Show cache debug info', value=False):
+        st.markdown('### Cache Debug Information')
+        
+        # Show current session state keys
+        st.write('**Session State Keys:**', list(st.session_state.keys()))
+        
+        # Show previous sentence scores
+        prev_scores = st.session_state.get('prev_sentence_scores', {})
+        st.write(f'**Previous Sentence Scores:** {len(prev_scores)} entries')
+        if prev_scores:
+            st.write('Sample keys:', list(prev_scores.keys())[:3])
+            st.write('Sample values:', {k: v for k, v in list(prev_scores.items())[:2]})
+        
+        # Show current passage and queries
+        current_passage = st.session_state.get('passage_text', '')
+        current_queries = st.session_state.get('queries_text', '')
+        st.write(f'**Current Passage Length:** {len(current_passage)} chars')
+        st.write(f'**Current Queries:** {len(current_queries.splitlines())} lines')
+        
+        # Show sentence hashing for current passage
+        if current_passage:
+            import hashlib
+            sents = split_sents(current_passage)
+            st.write(f'**Current Sentences:** {len(sents)} sentences')
+            for i, (s, e, txt) in enumerate(sents[:3]):
+                key = hashlib.md5(txt.encode('utf-8')).hexdigest()
+                st.write(f'  S{i+1}: {key[:8]}... ("{txt[:50]}...")')
+        
+        # Clear cache button
+        if st.button('🗑️ Clear all cache'):
+            for key in list(st.session_state.keys()):
+                if key.startswith('prev_') or key in ['passage_text', 'queries_text']:
+                    del st.session_state[key]
+            st.success('Cache cleared!')
+            st.rerun()
+
 
     # --- Repetition meter + synonym nudges ---
     st.markdown("### Repetition Meter & Synonym Nudges")
