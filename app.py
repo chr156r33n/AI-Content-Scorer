@@ -152,23 +152,40 @@ def render_highlighted(passage: str, window_scores: List[Tuple]) -> str:
             window_html = f"<span style='{color_for_score(score)}; display: inline-block;'>{window_text}{annotation}</span>"
             result = result[:start] + window_html + result[end:]
     
-    # Now apply unique word coloring to text parts only
-    # Split by HTML tags and only process text parts
-    parts = re.split(r'(<[^>]+>)', result)
+    # Now apply unique word coloring to text that's NOT inside window highlights
+    # We'll process the result and only color words that are not inside <span> tags
+    def color_unique_words(match):
+        word = match.group(0)
+        word_lower = word.lower()
+        if word_lower in unique_words:
+            return f"<span style='color: green; font-weight: bold;'>{word}</span>"
+        return word
     
-    for i, part in enumerate(parts):
-        # Only process parts that are not HTML tags
-        if not (part.startswith('<') and part.endswith('>')):
-            def color_unique_words(match):
-                word = match.group(0)
-                word_lower = word.lower()
-                if word_lower in unique_words:
-                    return f"<span style='color: green; font-weight: bold;'>{word}</span>"
-                return word
-            
-            parts[i] = re.sub(r'\b\w+\b', color_unique_words, part)
+    # Use a more sophisticated approach to avoid coloring inside window highlights
+    # Find all window highlight spans and mark their positions
+    span_pattern = r'<span style="[^"]*border:[^"]*"[^>]*>([^<]*)</span>'
+    spans = list(re.finditer(span_pattern, result))
     
-    return ''.join(parts)
+    # Build result by processing text between spans
+    final_result = []
+    last_end = 0
+    
+    for span_match in spans:
+        # Add text before this span (with unique word coloring)
+        before_text = result[last_end:span_match.start()]
+        colored_before = re.sub(r'\b\w+\b', color_unique_words, before_text)
+        final_result.append(colored_before)
+        
+        # Add the span as-is (no unique word coloring inside)
+        final_result.append(span_match.group(0))
+        last_end = span_match.end()
+    
+    # Add remaining text after last span
+    remaining_text = result[last_end:]
+    colored_remaining = re.sub(r'\b\w+\b', color_unique_words, remaining_text)
+    final_result.append(colored_remaining)
+    
+    return ''.join(final_result)
 
 
 # ---- UI ----
