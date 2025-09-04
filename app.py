@@ -102,23 +102,52 @@ def color_for_score(v: float) -> str:
     width = max(1, int(v * 3))  # 1-3px border width
     opacity = max(0.3, v)       # 30%-100% opacity
     return f"border: {width}px dotted rgba(255, 0, 0, {opacity:.2f}); padding: 2px; margin: 1px;"
+
+def get_unique_words(text: str) -> set:
+    """Get set of unique content words (non-stop, ≥3 chars, appearing only once)"""
+    toks = tokenize(text)
+    ctoks = content_tokens(toks)
+    # Count occurrences of each content token
+    from collections import Counter
+    counts = Counter(ctoks)
+    # Return only words that appear exactly once and are ≥3 chars
+    return {word for word, count in counts.items() if count == 1 and len(word) >= 3}
+
 def render_highlighted(passage: str, window_scores):
     if not passage: return ""
+    
+    # Get unique words for blue highlighting
+    unique_words = get_unique_words(passage)
+    
     scores = np.zeros(len(passage), float)
     for s, e, v in window_scores:
         s, e = max(0,s), min(len(passage), e)
         if e > s: scores[s:e] = np.maximum(scores[s:e], v)
+    
     html, i = [], 0
     buck = lambda x: round(x, 2)
     while i < len(passage):
         b = buck(scores[i]); j = i+1
         while j < len(passage) and buck(scores[j]) == b: j += 1
         seg = (passage[i:j].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
-        if b > 0.1:  # Only add border for meaningful scores
-            # Add small score annotation
+        
+        # Check if this segment contains unique words
+        seg_lower = seg.lower()
+        is_unique = any(word in seg_lower for word in unique_words)
+        
+        if b > 0.1:  # High overlap score
             annotation = f"<sup style='font-size:0.7em; color:#666;'>({b:.2f})</sup>"
-            html.append(f"<span style='{color_for_score(b)}'>{seg}{annotation}</span>")
+            if is_unique:
+                # Both high overlap AND unique - combine styling
+                html.append(f"<span style='{color_for_score(b)}; color: blue;'>{seg}{annotation}</span>")
+            else:
+                # Just high overlap
+                html.append(f"<span style='{color_for_score(b)}'>{seg}{annotation}</span>")
+        elif is_unique:
+            # Just unique (no high overlap)
+            html.append(f"<span style='color: blue; font-weight: bold;'>{seg}</span>")
         else:
+            # Neither high overlap nor unique
             html.append(seg)
         i = j
     return "".join(html)
