@@ -121,14 +121,22 @@ def get_unique_words(text: str) -> set:
     counts = Counter(ctoks)
     # Return only words that appear exactly once and are ≥3 chars
     return {word for word, count in counts.items() if count == 1 and len(word) >= 3}
-def color_for_score(v: float) -> str:
+
 def color_for_score(v: float) -> str:
     v = max(0.0, min(1.0, v))
     width = max(1, int(v * 3))  # 1-3px border width
     opacity = max(0.3, v)       # 30%-100% opacity
     return f"border: {width}px dotted rgba(255, 0, 0, {opacity:.2f}); padding: 4px 6px; margin: 2px;"
 
-    # Then, apply window span highlighting with red dotted borders
+def render_highlighted(passage: str, window_scores: List[Tuple]) -> str:
+    """Render passage with window highlighting and unique word coloring"""
+    # Get unique words for green highlighting
+    unique_words = get_unique_words(passage)
+    
+    # Start with the original passage
+    result = passage
+    
+    # Apply window span highlighting with red dotted borders
     sorted_windows = sorted(window_scores, key=lambda x: x[0])
     
     # Apply window spans from end to beginning to avoid position shifts
@@ -144,36 +152,6 @@ def color_for_score(v: float) -> str:
             result = result[:start] + window_html + result[end:]
     
     # Now apply unique word coloring
-    import re
-    
-    def color_unique_words(match):
-        word = match.group(0)
-        word_lower = word.lower()
-        if word_lower in unique_words:
-            return f"<span style='color: green; font-weight: bold;'>{word}</span>"
-        return word
-    
-    result = re.sub(r'\b\w+\b', color_unique_words, result)
-    
-    return result            result = result[:start] + window_html + result[end:]
-    
-    # Now apply unique word coloring
-    import re
-    
-    def color_unique_words(match):
-        word = match.group(0)
-        word_lower = word.lower()
-        if word_lower in unique_words:
-            return f"<span style='color: green; font-weight: bold;'>{word}</span>"
-        return word
-    
-    # Apply unique word coloring
-    result = re.sub(r'\b\w+\b', color_unique_words, result)
-    
-    return result    
-    # Now apply unique word coloring
-    import re
-    
     def color_unique_words(match):
         word = match.group(0)
         word_lower = word.lower()
@@ -185,6 +163,7 @@ def color_for_score(v: float) -> str:
     result = re.sub(r'\b\w+\b', color_unique_words, result)
     
     return result
+
 # ---- UI ----
 st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
 st.title("Semantic Overlap & Density — FastEmbed (no Torch)")
