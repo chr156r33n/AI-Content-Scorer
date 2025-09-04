@@ -133,8 +133,8 @@ WINDOW_PALETTE = [
     "#00897b", "#6d4c41", "#3949ab", "#c0ca33", "#f4511e"
 ]
 QUERY_PALETTE = [
-    "#d81b60", "#3949ab", "#00897b", "#f4511e", "#5e35b1",
-    "#039be5", "#7cb342", "#8d6e63", "#fdd835", "#00acc1"
+    "#e91e63", "#3f51b5", "#009688", "#ff5722", "#673ab7",
+    "#2196f3", "#4caf50", "#ff9800", "#ffeb3b", "#00bcd4"
 ]
 
 def color_for_window(win_idx: int, score: float) -> str:
@@ -299,7 +299,8 @@ def render_passage(
                     chunk = html.escape(seg[i:j])
                     if qid >= 0:
                         color = QUERY_PALETTE[qid % len(QUERY_PALETTE)]
-                        chunk = f"<span style='border-bottom:2px solid {color}'>{chunk}</span>"
+                        # Use a more visible styling with background highlight and thicker border
+                        chunk = f"<span style='background: {color}15; border-bottom: 3px solid {color}; border-radius: 2px; padding: 1px 2px;'>{chunk}</span>"
                     colored.append(chunk)
                     i = j
                 seg_html = "".join(colored)
@@ -661,6 +662,19 @@ if st.button("Score Passage"):
     st.markdown("### Query Key")
     st.markdown(", ".join([f"**Q{i+1}**: <span style='color:{QUERY_PALETTE[i%len(QUERY_PALETTE)]}'>{html.escape(q)}</span>"
                            for i, q in enumerate(queries)]) , unsafe_allow_html=True)
+    
+    # Add explanation of per-query stripes if they're enabled
+    if show_stripes:
+        st.markdown("### Per-Query Coverage Stripes")
+        st.markdown("""
+        <div style='background: #f8f9fa; padding: 10px; border-radius: 5px; margin: 10px 0;'>
+        <strong>💡 How to read the stripes:</strong><br>
+        • <span style='background: #e91e6315; border-bottom: 3px solid #e91e63; padding: 1px 2px; border-radius: 2px;'>Colored background + thick border</span> = This text best matches that query<br>
+        • Each query gets a unique color from the palette above<br>
+        • Stripes show which parts of your content align with specific search terms<br>
+        • Use this to identify gaps where you need to add more relevant content
+        </div>
+        """, unsafe_allow_html=True)
 
     # --- Sentence chips with deltas ---
     if show_sentence_chips:
