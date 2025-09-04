@@ -155,9 +155,7 @@ def color_for_score(v: float) -> str:
     
     result = re.sub(r'\b\w+\b', color_unique_words, result)
     
-    return result            # Wrap in div with red dotted border
-            window_html = f"<div style='{color_for_score(score)}; display: block;'>{window_text}{annotation}</div>"
-            result = result[:start] + window_html + result[end:]
+    return result            result = result[:start] + window_html + result[end:]
     
     # Now apply unique word coloring
     import re
