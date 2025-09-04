@@ -678,7 +678,7 @@ with st.expander("📘 How to use", expanded=False):
 **Goal:** Tweak your passage so it scores higher on *Relevance*, *Uniques*, and *Density*.
 
 **Steps**
-1. **Paste your passage** on the left.
+1. **Paste your passage** in the left box above.
 2. **Add 1–10 queries** (one per line) on the right.
 3. Adjust **Window Size/Stride** in the sidebar.
 4. Click **Score Passage**.
