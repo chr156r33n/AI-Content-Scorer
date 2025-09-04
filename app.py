@@ -121,38 +121,41 @@ def get_unique_words(text: str) -> set:
     counts = Counter(ctoks)
     # Return only words that appear exactly once and are ≥3 chars
     return {word for word, count in counts.items() if count == 1 and len(word) >= 3}
-    return overlap_len, window_scores, sims, q_labels, w_labels
+def color_for_score(v: float) -> str:
 def color_for_score(v: float) -> str:
     v = max(0.0, min(1.0, v))
-def render_highlighted(passage: str, window_scores):
-    # Convert score to border width (0-3px) and opacity
     width = max(1, int(v * 3))  # 1-3px border width
     opacity = max(0.3, v)       # 30%-100% opacity
     return f"border: {width}px dotted rgba(255, 0, 0, {opacity:.2f}); padding: 4px 6px; margin: 2px;"
-    if not passage: return ""
-    
-    # Get unique words for blue highlighting
-    unique_words = get_unique_words(passage)
-    
-    # First, apply window span highlighting with red dotted borders
-    # Sort window scores by position to avoid overlapping issues
+
+    # Then, apply window span highlighting with red dotted borders
     sorted_windows = sorted(window_scores, key=lambda x: x[0])
     
     # Apply window spans from end to beginning to avoid position shifts
-    result = passage.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     for start, end, score, contributing_queries in reversed(sorted_windows):
-        if score > 0.1:  # Only highlight meaningful scores
-            # Extract the text in this window
+        if score > 0.1:
             window_text = result[start:end]
             
-            # Create detailed annotation with query breakdown
-            query_breakdown = []
-            for j, query, q_score in contributing_queries[:2]:  # Show top 2 contributing queries
-                query_breakdown.append(f"Q{j+1}:{q_score:.2f}")
-            breakdown_text = " | ".join(query_breakdown) if query_breakdown else "no matches"
+            # Format query breakdown
+            breakdown_text = " | ".join([f"Q{q_idx+1}:{q_score:.2f}" for q_idx, _, q_score in contributing_queries[:2]])
             annotation = f"<sup style='font-size:0.7em; color:#666;'>({score:.2f} | {breakdown_text})</sup>"
             
-            # Wrap in div with red dotted border
+            window_html = f"<div style='{color_for_score(score)}; display: block;'>{window_text}{annotation}</div>"
+            result = result[:start] + window_html + result[end:]
+    
+    # Now apply unique word coloring
+    import re
+    
+    def color_unique_words(match):
+        word = match.group(0)
+        word_lower = word.lower()
+        if word_lower in unique_words:
+            return f"<span style='color: green; font-weight: bold;'>{word}</span>"
+        return word
+    
+    result = re.sub(r'\b\w+\b', color_unique_words, result)
+    
+    return result            # Wrap in div with red dotted border
             window_html = f"<div style='{color_for_score(score)}; display: block;'>{window_text}{annotation}</div>"
             result = result[:start] + window_html + result[end:]
     
