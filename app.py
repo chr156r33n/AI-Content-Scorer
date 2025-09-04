@@ -101,7 +101,7 @@ def color_for_score(v: float) -> str:
     # Convert score to border width (0-3px) and opacity
     width = max(1, int(v * 3))  # 1-3px border width
     opacity = max(0.3, v)       # 30%-100% opacity
-    return f"border: {width}px dotted rgba(255, 0, 0, {opacity:.2f}); padding: 2px; margin: 1px;"
+    return f"border: {width}px dotted rgba(255, 0, 0, {opacity:.2f}); padding: 4px 6px; margin: 2px;"
 
 def get_unique_words(text: str) -> set:
     """Get set of unique content words (non-stop, ≥3 chars, appearing only once)"""
