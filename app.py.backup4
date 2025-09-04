@@ -391,31 +391,7 @@ def build_llm_prompt(
     q_block = "\n".join([f"Q{i+1}: {q}" for i, q in enumerate(queries)])
     brand = f"\nBRAND GUARDRAILS:\n{brand_notes}\n" if brand_notes else ""
 
-    prompt = f"""You are an expert web copy editor. Analyze and improve this passage across three key dimensions: relevance, semantic diversity, and density. Be concise and actionable.
-
-SCORING METHODOLOGY:
-
-DENSITY SCORE (Gzip Compression):
-- Measures text conciseness using gzip compression ratio
-- Lower scores = more concise, higher scores = more verbose
-- Formula: gzip_compressed_size / original_size, normalized by log(token_count)
-- To improve: Remove redundant phrases, use precise vocabulary, eliminate filler words
-
-SEMANTIC UNIQUES SCORE:
-- Measures vocabulary diversity by counting words that appear only once
-- Higher scores = more varied vocabulary, lower scores = repetitive language
-- Formula: (unique_words >= 3 chars) / total_content_words
-- To improve: Use synonyms, vary sentence structure, introduce domain-specific terms
-
-QUERY RELEVANCE SCORE (Overlap):
-- Measures how well content addresses target queries using semantic similarity
-- Higher scores = better query coverage, lower scores = off-topic content
-- Formula: Average of max cosine similarity between queries and sliding windows
-- To improve: Directly address query terms, use related concepts, maintain topic focus
-
-OVERALL BALANCE SCORE:
-- Geometric mean of all three scores (0.0 to 1.0)
-- Represents holistic content quality across all dimensions
+    prompt = f"""You are an expert web copy editor. Analyze and improve this passage across three key dimensions: relevance, semantic diversity, and density. Provide detailed analysis and actionable suggestions.
 
 ANALYSIS FRAMEWORK:
 - Relevance: How well does the content address the target queries?
@@ -437,14 +413,13 @@ CONTENT ANALYSIS:
 PASSAGE TO IMPROVE:
 {passage[:6000]}
 
-Return JSON with these keys (be concise):
-- "detailed_analysis": 2-3 concise paragraphs identifying key strengths, weaknesses, and improvement opportunities.
-- "suggestions_table": 4-6 specific, actionable suggestions. Each row: "Issue", "Current Text", "Suggested Change", "Reason". Use markdown table format.
-- "reasoning": 2-3 bullet points explaining key changes and metric improvements.
+Return JSON with these keys:
+- "detailed_analysis": A comprehensive 3-4 paragraph analysis of the current content, identifying specific strengths, weaknesses, and opportunities for improvement.
+- "suggestions_table": A table with 5-8 specific, actionable suggestions. Each row should have: "Issue", "Current Text", "Suggested Change", "Reason". Use markdown table format.
+- "reasoning": 3-4 bullet points explaining the key changes made in the rewrite and why they improve the metrics.
 - "rewrite": The improved passage that addresses the identified issues while maintaining natural flow.
 """
     return prompt
-
 def call_gpt35(api_key: str, prompt: str, temperature: float = 0.2, model: str = GPT_DEFAULT) -> Dict:
     headers = {
         "Authorization": f"Bearer {api_key.strip()}",
@@ -454,7 +429,7 @@ def call_gpt35(api_key: str, prompt: str, temperature: float = 0.2, model: str =
         "model": model,
         "temperature": float(temperature),
         "messages": [
-            {"role": "system", "content": "You are a precise, concise web editor. Keep all responses brief and actionable."},
+            {"role": "system", "content": "You are a precise, concise web editor."},
             {"role": "user", "content": prompt}
         ],
         "response_format": {"type": "json_object"}
