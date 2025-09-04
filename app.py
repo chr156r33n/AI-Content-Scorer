@@ -98,10 +98,10 @@ def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-e
 
 def color_for_score(v: float) -> str:
     v = max(0.0, min(1.0, v))
-    base = np.array([173, 216, 230], float); target = np.array([255, 255, 0], float)
-    rgb = (base + v*(target-base)).astype(int)
-    return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
-
+    # Convert score to border width (0-3px) and opacity
+    width = max(1, int(v * 3))  # 1-3px border width
+    opacity = max(0.3, v)       # 30%-100% opacity
+    return f"border: {width}px dotted rgba(255, 0, 0, {opacity:.2f}); padding: 2px; margin: 1px;"
 def render_highlighted(passage: str, window_scores):
     if not passage: return ""
     scores = np.zeros(len(passage), float)
@@ -114,7 +114,12 @@ def render_highlighted(passage: str, window_scores):
         b = buck(scores[i]); j = i+1
         while j < len(passage) and buck(scores[j]) == b: j += 1
         seg = (passage[i:j].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
-        html.append(f"<span style='background:{color_for_score(b)}'>{seg}</span>")
+        if b > 0.1:  # Only add border for meaningful scores
+            # Add small score annotation
+            annotation = f"<sup style='font-size:0.7em; color:#666;'>({b:.2f})</sup>"
+            html.append(f"<span style='{color_for_score(b)}'>{seg}{annotation}</span>")
+        else:
+            html.append(seg)
         i = j
     return "".join(html)
 
