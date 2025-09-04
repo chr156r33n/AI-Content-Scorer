@@ -153,10 +153,9 @@ def render_highlighted(passage: str, window_scores):
             return word
     
     # Replace all words with styled versions
-    result = re.sub(r'\b\w+\b', replace_word, passage)
+    escaped_passage = passage.replace("result = re.sub(r'\b\w+\b', replace_word, passage)", "result = re.sub(r'\b\w+\b', replace_word, passage)amp;").replace("<", "result = re.sub(r'\b\w+\b', replace_word, passage)lt;").replace(">", "result = re.sub(r'\b\w+\b', replace_word, passage)gt;")
+    result = re.sub(r'\b\w+\b', replace_word, escaped_passage)
     
-    # Escape HTML entities
-    result = result.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     
     return result
 # ---- UI ----
