@@ -91,28 +91,28 @@ def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-e
     overlap_len = max(0.0, min(1.0, overlap_raw * length_factor))
 
     per_win_max = np.max(sims, axis=0) if sims.size else np.zeros(len(wins))
-    window_scores = [(span[0], span[1], float(v)) for span, v in zip(w_spans, per_win_max)]
+    
+    # Create detailed window scores with query breakdown
+    window_scores = []
+    for i, (span, max_score) in enumerate(zip(w_spans, per_win_max)):
+        # Find which queries contributed to this window's max score
+        contributing_queries = []
+        for j, query in enumerate(queries):
+            if sims.size and j < sims.shape[0] and i < sims.shape[1]:
+                query_score = sims[j, i]
+                if query_score >= max_score * 0.8:  # Include queries within 80% of max
+                    contributing_queries.append((j, query, query_score))
+        
+        # Sort by score descending
+        contributing_queries.sort(key=lambda x: x[2], reverse=True)
+        
+        window_scores.append((span[0], span[1], float(max_score), contributing_queries))
+    
     q_labels = [f"Q{i+1}" for i in range(len(queries))]
     w_labels = [f"W{i+1}" for i in range(len(wins))]
     return overlap_len, window_scores, sims, q_labels, w_labels
-
 def color_for_score(v: float) -> str:
     v = max(0.0, min(1.0, v))
-    # Convert score to border width (0-3px) and opacity
-    width = max(1, int(v * 3))  # 1-3px border width
-    opacity = max(0.3, v)       # 30%-100% opacity
-    return f"border: {width}px dotted rgba(255, 0, 0, {opacity:.2f}); padding: 4px 6px; margin: 2px;"
-
-def get_unique_words(text: str) -> set:
-    """Get set of unique content words (non-stop, ≥3 chars, appearing only once)"""
-    toks = tokenize(text)
-    ctoks = content_tokens(toks)
-    # Count occurrences of each content token
-    from collections import Counter
-    counts = Counter(ctoks)
-    # Return only words that appear exactly once and are ≥3 chars
-    return {word for word, count in counts.items() if count == 1 and len(word) >= 3}
-
 def render_highlighted(passage: str, window_scores):
     if not passage: return ""
     
@@ -125,15 +125,36 @@ def render_highlighted(passage: str, window_scores):
     
     # Apply window spans from end to beginning to avoid position shifts
     result = passage.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    for start, end, score in reversed(sorted_windows):
+    for start, end, score, contributing_queries in reversed(sorted_windows):
         if score > 0.1:  # Only highlight meaningful scores
             # Extract the text in this window
             window_text = result[start:end]
+            
+            # Create detailed annotation with query breakdown
+            query_breakdown = []
+            for j, query, q_score in contributing_queries[:2]:  # Show top 2 contributing queries
+                query_breakdown.append(f"Q{j+1}:{q_score:.2f}")
+            breakdown_text = " | ".join(query_breakdown) if query_breakdown else "no matches"
+            annotation = f"<sup style='font-size:0.7em; color:#666;'>({score:.2f} | {breakdown_text})</sup>"
+            
             # Wrap in div with red dotted border
-            annotation = f"<sup style='font-size:0.7em; color:#666;'>({score:.2f})</sup>"
-            window_html = f"<div style='{color_for_score(score)}; display: inline;'>{window_text}{annotation}</div>"
+            window_html = f"<div style='{color_for_score(score)}; display: block;'>{window_text}{annotation}</div>"
             result = result[:start] + window_html + result[end:]
     
+    # Now apply unique word coloring
+    import re
+    
+    def color_unique_words(match):
+        word = match.group(0)
+        word_lower = word.lower()
+        if word_lower in unique_words:
+            return f"<span style='color: green; font-weight: bold;'>{word}</span>"
+        return word
+    
+    # Apply unique word coloring
+    result = re.sub(r'\b\w+\b', color_unique_words, result)
+    
+    return result    
     # Now apply unique word coloring
     import re
     
