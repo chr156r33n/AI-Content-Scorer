@@ -119,47 +119,35 @@ def render_highlighted(passage: str, window_scores):
     # Get unique words for blue highlighting
     unique_words = get_unique_words(passage)
     
-    scores = np.zeros(len(passage), float)
-    for s, e, v in window_scores:
-        s, e = max(0,s), min(len(passage), e)
-        if e > s: scores[s:e] = np.maximum(scores[s:e], v)
-    
-    # Process text word by word using regex substitution
+    # First, apply text color styling to unique words
     import re
     
-    def replace_word(match):
+    def color_unique_words(match):
         word = match.group(0)
         word_lower = word.lower()
-        
-        # Get score for this word position
-        start = match.start()
-        end = match.end()
-        word_score = np.max(scores[start:end]) if end <= len(scores) else 0.0
-        buck_score = round(word_score, 2)
-        
-        # Check if it's a unique word
-        is_unique = word_lower in unique_words
-        
-        # Apply styling
-        if buck_score > 0.1:  # High overlap
-            annotation = f"<sup style='font-size:0.7em; color:#666;'>({buck_score:.2f})</sup>"
-            if is_unique:
-                return f"<span style='{color_for_score(buck_score)}; color: blue;'>{word}{annotation}</span>"
-            else:
-                return f"<span style='{color_for_score(buck_score)}'>{word}{annotation}</span>"
-        elif is_unique:
+        if word_lower in unique_words:
             return f"<span style='color: blue; font-weight: bold;'>{word}</span>"
-        else:
-            return word
+        return word
     
-    # Replace all words with styled versions
-    escaped_passage = passage.replace("result = re.sub(r'\b\w+\b', replace_word, passage)", "result = re.sub(r'\b\w+\b', replace_word, passage)amp;").replace("<", "result = re.sub(r'\b\w+\b', replace_word, passage)lt;").replace(">", "result = re.sub(r'\b\w+\b', replace_word, passage)gt;")
-    result = re.sub(r'\b\w+\b', replace_word, escaped_passage)
+    # Apply unique word coloring
+    escaped_passage = passage.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    result = re.sub(r'\b\w+\b', color_unique_words, escaped_passage)
     
+    # Now apply window span highlighting with red dotted borders
+    # Sort window scores by position to avoid overlapping issues
+    sorted_windows = sorted(window_scores, key=lambda x: x[0])
     
-    return result
-# ---- UI ----
-st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
+    # Apply window spans from end to beginning to avoid position shifts
+    for start, end, score in reversed(sorted_windows):
+        if score > 0.1:  # Only highlight meaningful scores
+            # Extract the text in this window
+            window_text = result[start:end]
+            # Wrap in div with red dotted border
+            annotation = f"<sup style='font-size:0.7em; color:#666;'>({score:.2f})</sup>"
+            window_html = f"<div style='{color_for_score(score)}; display: inline;'>{window_text}{annotation}</div>"
+            result = result[:start] + window_html + result[end:]
+    
+    return resultst.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
 st.title("Semantic Overlap & Density — FastEmbed (no Torch)")
 st.caption("CPU-only ONNX embeddings. Quick startup, solid quality. Great for local/air-gapped use.")
 
@@ -211,7 +199,7 @@ if st.button("Score Passage"):
 
     st.markdown("---")
     st.subheader("Annotated Passage (overlap heat)")
-    st.markdown("<div style='line-height:1.8; font-size:1.05rem;'>"+render_highlighted(passage, win_scores)+"</div>",
+    st.markdown("<div style='line-height:1.8; font-size:1.05rem; background-color: white; padding: 15px; border-radius: 5px;'>"+render_highlighted(passage, win_scores)+"</div>",
                 unsafe_allow_html=True)
 
 
