@@ -9,7 +9,7 @@ import requests  # used ONLY when user provides an API key
 MIN_WINDOW_BORDER_SCORE = 0.0  # border visible only if score >= this; badges always shown
 MAX_QUERIES = 10
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
-GPT35_DEFAULT = "gpt-3.5-turbo-0125"   # safe default; change if needed
+GPT_DEFAULT = "gpt-4o-mini"   # safe default; change if needed
 
 # ---- Safe defaults so reruns never crash ----
 st.session_state.setdefault("has_scored", False)
@@ -420,7 +420,7 @@ Return JSON with these keys:
 - "rewrite": The improved passage that addresses the identified issues while maintaining natural flow.
 """
     return prompt
-def call_gpt35(api_key: str, prompt: str, temperature: float = 0.2, model: str = GPT35_DEFAULT) -> Dict:
+def call_gpt35(api_key: str, prompt: str, temperature: float = 0.2, model: str = GPT_DEFAULT) -> Dict:
     headers = {
         "Authorization": f"Bearer {api_key.strip()}",
         "Content-Type": "application/json",
@@ -494,15 +494,21 @@ with st.sidebar:
     st.markdown("### Optional: OpenAI GPT Rewrite")
     openai_key = st.text_input("OpenAI API Key", type="password", value=init_state("openai_key", ""))
     st.session_state["openai_key"] = openai_key
-    gpt_temp = st.slider("Creativity (temperature)", 0.0, 1.0, init_state("gpt_temp", 0.2), 0.05)
+    # Model selection with temperature adjustment
+    gpt_model = st.selectbox("OpenAI GPT model",
+        ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo-0125", "gpt-5-mini", "gpt-5"],
+        index=init_state("gpt_model_idx", 0),
+        help="GPT-5 models require temperature=1.0")
+    st.session_state["gpt_model_idx"] = ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo-0125", "gpt-5-mini", "gpt-5"].index(gpt_model)
+    st.session_state["gpt_model"] = gpt_model
+    
+    # Adjust temperature default based on model
+    default_temp = 1.0 if gpt_model.startswith("gpt-5") else 0.2
+    gpt_temp = st.slider("Creativity (temperature)", 0.0, 1.0, init_state("gpt_temp", default_temp), 0.05)
     st.session_state["gpt_temp"] = gpt_temp
     brand_notes = st.text_area("Brand guardrails (tone, style, banned words, etc.)",
                                value=init_state("brand_notes", ""))
     st.session_state["brand_notes"] = brand_notes
-    gpt_model = st.text_input("OpenAI GPT model", value=init_state("gpt_model", GPT35_DEFAULT),
-                              help="Defaults to gpt-3.5-turbo-0125. Change if needed.")
-    st.session_state["gpt_model"] = gpt_model
-
 # Inputs
 colA, colB = st.columns([1,1])
 with colA:
@@ -608,7 +614,7 @@ if st.button("Score Passage"):
                 api_key=st.session_state["openai_key"],
                 prompt=prompt,
                 temperature=float(st.session_state.get("gpt_temp", 0.2)),
-                model=st.session_state.get("gpt_model", GPT35_DEFAULT)
+                model=st.session_state.get("gpt_model", "gpt-4o-mini")
             )
         if "error" in resp:
             st.error(resp["error"])
