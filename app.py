@@ -487,8 +487,8 @@ def render_diff(old: str, new: str):
                 + "\n".join(out) + "</div>", unsafe_allow_html=True)
 
 # ----------------- UI -----------------
-st.set_page_config(page_title="Semantic Overlap & Density (Editor Mode)", layout="wide")
-st.title("Semantic Overlap & Density — Editor Mode (FastEmbed)")
+st.set_page_config(page_title="Semantic Overlap & Density", layout="wide")
+st.title("Semantic Overlap & Density")
 
 def init_state(key, default):
     if key not in st.session_state:
@@ -652,15 +652,15 @@ if st.button("Score Passage"):
             
             with col2:
                 st.markdown("**OpenAI GPT Rewrite**")
-                gzip_delta = rewrite_scores[gzip_norm] - gzip_norm
-                semu_delta = rewrite_scores[semu_norm] - semu_norm
-                ov_delta = rewrite_scores[ov_len] - ov_len
-                final_delta = rewrite_scores[final] - final
+                gzip_delta = rewrite_scores["gzip_norm"] - gzip_norm
+                semu_delta = rewrite_scores["semu_norm"] - semu_norm
+                ov_delta = rewrite_scores["ov_len"] - ov_len
+                final_delta = rewrite_scores["final"] - final
                 
-                st.metric("Gzip (density)", f"{rewrite_scores[gzip_norm]:.2f}", delta=f"{gzip_delta:+.2f}")
-                st.metric("Semantic Uniques", f"{rewrite_scores[semu_norm]:.2f}", delta=f"{semu_delta:+.2f}")
-                st.metric("Overlap (relevance)", f"{rewrite_scores[ov_len]:.2f}", delta=f"{ov_delta:+.2f}")
-                st.metric("Content Balance", f"{rewrite_scores[final]:.2f}", delta=f"{final_delta:+.2f}")
+                st.metric("Gzip (density)", f"{rewrite_scores["gzip_norm"]:.2f}", delta=f"{gzip_delta:+.2f}")
+                st.metric("Semantic Uniques", f"{rewrite_scores["semu_norm"]:.2f}", delta=f"{semu_delta:+.2f}")
+                st.metric("Overlap (relevance)", f"{rewrite_scores["ov_len"]:.2f}", delta=f"{ov_delta:+.2f}")
+                st.metric("Content Balance", f"{rewrite_scores["final"]:.2f}", delta=f"{final_delta:+.2f}")
             
             # Summary of improvements
             improvements = []
