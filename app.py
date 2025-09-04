@@ -2,12 +2,14 @@ import math, gzip, io, re
 from typing import List, Tuple
 import numpy as np
 import streamlit as st
-from sentence_transformers import SentenceTransformer
 
-# ---- Speed: cache model + load only when needed ----
+# ---- Fast, torch-free embeddings ----
+from fastembed import TextEmbedding
+
 @st.cache_resource(show_spinner=False)
-def get_sbert(model_name: str = "all-MiniLM-L6-v2") -> SentenceTransformer:
-    return SentenceTransformer(model_name)
+def get_embedder(model_name: str = "BAAI/bge-small-en-v1.5"):
+    # First call downloads a small ONNX (~50–90MB) into HF cache; later runs are instant
+    return TextEmbedding(model_name=model_name)
 
 STOP = {"the","a","an","and","or","but","if","then","so","as","at","by","for","in","of","on","to","with",
         "is","are","was","were","be","been","being","it","its","this","that","these","those","we","you",
@@ -60,21 +62,24 @@ def sliding_windows(sents, win_size=3, stride=2):
         wins.append((start, end, " ".join([c[2] for c in chunk])))
     return wins
 
-def embed_sbert(texts: List[str], model_name="all-MiniLM-L6-v2") -> np.ndarray:
-    model = get_sbert(model_name)
-    vecs = model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
-    return vecs.astype(np.float32)
+def embed_fastembed(texts: List[str], model_name="BAAI/bge-small-en-v1.5") -> np.ndarray:
+    model = get_embedder(model_name)
+    # FastEmbed returns a generator of vectors
+    vecs = np.stack(list(model.embed(texts))).astype(np.float32)
+    # L2-normalize for cosine
+    norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12
+    return vecs / norms
 
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return a @ b.T  # already normalized
 
-def overlap_sbert(passage: str, queries: List[str], model_name="all-MiniLM-L6-v2",
+def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-en-v1.5",
                   win_size=3, stride=2):
     sents = split_sents(passage)
     wins = sliding_windows(sents, win_size=win_size, stride=stride) or [(0, len(passage), passage)]
     w_texts = [w[2] for w in wins]; w_spans = [(w[0], w[1]) for w in wins]
 
-    vecs = embed_sbert(queries + w_texts, model_name=model_name)
+    vecs = embed_fastembed(queries + w_texts, model_name=model_name)
     q_vecs, w_vecs = vecs[:len(queries)], vecs[len(queries):]
     sims = cosine_sim(q_vecs, w_vecs) if len(queries) and len(w_texts) else np.zeros((0,0))
 
@@ -114,16 +119,23 @@ def render_highlighted(passage: str, window_scores):
     return "".join(html)
 
 # ---- UI ----
-st.set_page_config(page_title="Semantic Overlap & Density (Fast SBERT)", layout="wide")
-st.title("Semantic Overlap & Density — Fast SBERT")
-st.caption("Loads instantly after the first model download. Keep queries short and specific.")
+st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
+st.title("Semantic Overlap & Density — FastEmbed (no Torch)")
+st.caption("CPU-only ONNX embeddings. Quick startup, solid quality. Great for local/air-gapped use.")
 
 with st.sidebar:
-    model_name = st.selectbox("SBERT model", ["all-MiniLM-L6-v2","all-mpnet-base-v2"], index=0)
-    win_size   = st.slider("Sentence window size", 1, 6, 3)
-    stride     = st.slider("Window stride", 1, 6, 2)
+    model_name = st.selectbox(
+        "Embedding model",
+        [
+            "BAAI/bge-small-en-v1.5",   # 384-dim, fast & accurate
+            "intfloat/e5-small-v2"      # another solid small model
+        ],
+        index=0
+    )
+    win_size = st.slider("Sentence window size", 1, 6, 3)
+    stride   = st.slider("Window stride", 1, 6, 2)
     st.markdown("---")
-    st.write("Tip: First-ever run downloads the model; later runs are instant.")
+    st.write("Tip: First call downloads a small ONNX model; later runs are instant.")
 
 colA, colB = st.columns([1,1])
 with colA:
@@ -139,13 +151,13 @@ if st.button("Score Passage"):
     if not queries:
         st.warning("Please add 1–10 queries."); st.stop()
 
-    with st.spinner("Loading model & computing scores…"):
+    with st.spinner("Embedding & scoring…"):
         gr = gzip_ratio(passage)
         semuniq, tok_count, ctok_count, uniq_count = semantic_uniques_score(passage)
         gzip_adj   = gr / max(1e-9, math.log1p(tok_count))
         gzip_norm  = squash_01(gzip_adj)
         semu_norm  = squash_01(semuniq)
-        ov_len, win_scores, sims, q_labels, w_labels = overlap_sbert(
+        ov_len, win_scores, sims, q_labels, w_labels = overlap_embed(
             passage, queries, model_name=model_name, win_size=win_size, stride=stride
         )
         final = geometric_mean([gzip_norm, semu_norm, ov_len])
