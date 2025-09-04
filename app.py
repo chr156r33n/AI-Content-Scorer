@@ -152,19 +152,24 @@ def render_highlighted(passage: str, window_scores: List[Tuple]) -> str:
             window_html = f"<span style='{color_for_score(score)}; display: inline-block;'>{window_text}{annotation}</span>"
             result = result[:start] + window_html + result[end:]
     
-    # Now apply unique word coloring - but be careful not to color inside HTML tags
-    def color_unique_words(match):
-        word = match.group(0)
-        word_lower = word.lower()
-        if word_lower in unique_words:
-            return f"<span style='color: green; font-weight: bold;'>{word}</span>"
-        return word
+    # Now apply unique word coloring using a simpler approach
+    # Split the result into parts and only apply coloring to non-HTML parts
+    parts = re.split(r'(<[^>]+>)', result)
     
-    # Apply unique word coloring only to text that's not inside HTML tags
-    # This regex matches word boundaries that are not inside HTML tags
-    result = re.sub(r'(?<!<[^>]*)\b\w+\b(?![^<]*>)', color_unique_words, result)
+    for i, part in enumerate(parts):
+        # Only process parts that are not HTML tags
+        if not part.startswith('<') or not part.endswith('>'):
+            def color_unique_words(match):
+                word = match.group(0)
+                word_lower = word.lower()
+                if word_lower in unique_words:
+                    return f"<span style='color: green; font-weight: bold;'>{word}</span>"
+                return word
+            
+            parts[i] = re.sub(r'\b\w+\b', color_unique_words, part)
     
-    return result
+    return ''.join(parts)
+
 
 # ---- UI ----
 st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
