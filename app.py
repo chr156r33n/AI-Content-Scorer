@@ -502,57 +502,113 @@ with colB:
 st.session_state["passage_text"] = passage
 st.session_state["queries_text"] = raw_queries
 
-# Persist metrics for any later use; also mark that we just scored
-st.session_state["gzip_norm"]  = gzip_norm
-st.session_state["semu_norm"]  = semu_norm
-st.session_state["ov_len"]     = ov_len
-st.session_state["win_scores"] = win_scores
-st.session_state["has_scored"] = True
 
-# ---------------- GPT Rewrite (runs only on this Score Passage click) ----------------
-openai_key_clean = (st.session_state.get("openai_key") or "").strip()
-model_name_clean = (st.session_state.get("gpt_model", GPT35_DEFAULT) or GPT35_DEFAULT).strip()
-temperature_val  = float(st.session_state.get("gpt_temp", 0.2))
+st.session_state["passage_text"] = passage
+st.session_state["queries_text"] = raw_queries
 
-st.markdown("---")
-st.markdown("## GPT Rewrite")
+if st.button("Score Passage"):
+    if not passage.strip():
+        st.warning("Please paste a passage."); st.stop()
+    if not queries:
+        st.warning("Please add 1–10 queries."); st.stop()
 
-if not openai_key_clean:
-    st.info("Paste an OpenAI API key in the sidebar to enable the rewrite feature.")
-else:
-    # Build the prompt from locals computed in this same click
-    prompt = build_llm_prompt(
-        passage=passage,
-        queries=queries,
-        gzip_norm=gzip_norm,
-        semu_norm=semu_norm,
-        overlap_len=ov_len,
-        window_scores=win_scores,
-        brand_notes=st.session_state.get("brand_notes", "")
-    )
-
-    with st.spinner("Calling OpenAI…"):
-        resp = call_gpt35(
-            api_key=openai_key_clean,
-            prompt=prompt,
-            temperature=temperature_val,
-            model=model_name_clean
+    with st.spinner("Embedding & scoring…"):
+        gr = gzip_ratio(passage)
+        semuniq, tok_count, ctok_count, uniq_count = semantic_uniques_score(passage)
+        gzip_adj  = gr / max(1e-9, math.log1p(tok_count))
+        gzip_norm = squash_01(gzip_adj)
+        semu_norm = squash_01(semuniq)
+        ov_len, win_scores, sims, q_labels, w_labels, wins = overlap_embed(
+            passage, queries, model_name=model_name, win_size=win_size, stride=stride
         )
+        final = geometric_mean([gzip_norm, semu_norm, ov_len])
 
-    if isinstance(resp, dict) and "error" in resp:
-        st.error(resp["error"])
+        # Store analysis results in session state for GPT-3.5 rewrite
+        st.session_state["gzip_norm"] = gzip_norm
+        st.session_state["semu_norm"] = semu_norm
+        st.session_state["ov_len"] = ov_len
+        st.session_state["win_scores"] = win_scores
+
+    # --- Metrics ---
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Gzip (density, norm)", f"{gzip_norm:.2f}")
+    m2.metric("Semantic Uniques (norm)", f"{semu_norm:.2f}")
+    m3.metric("Overlap (relevance)",    f"{ov_len:.2f}")
+    m4.metric("Content Balance Score",  f"{final:.2f}")
+
+    if tok_count < 25:
+        st.info("Very short passages (< 25 tokens) can be unstable.")
+
+    st.markdown("---")
+
+    # --- Annotated passage ---
+    st.subheader("Annotated Passage")
+    html_block = render_passage(
+        passage=passage,
+        window_scores=win_scores,
+        wins=wins,
+        sims=sims,
+        queries=queries,
+        show_per_query_stripes=True,
+        show_filler_flags=st.session_state.get("show_filler", True),
+        overstuff_threshold=2,
+        show_windows=True
+    )
+    st.markdown("<div style='line-height:1.8; font-size:1.05rem;'>"+html_block+"</div>", unsafe_allow_html=True)
+
+    # Legend + Query key
+    st.markdown("### Legend")
+    legend_cols = st.columns(min(4, max(1, len(win_scores))))
+    for i, ws in enumerate(win_scores):
+        _, _, score, contrib, _ = ws
+        color = WINDOW_PALETTE[i % len(WINDOW_PALETTE)]
+        with legend_cols[i % len(legend_cols)]:
+            st.markdown(
+                f"<div style='display:inline-block;width:14px;height:14px;background:{color};"
+                f"border-radius:2px;margin-right:8px;vertical-align:middle;'></div>"
+                f"<span><b>W{i+1}</b> (score {score:.2f})</span>",
+                unsafe_allow_html=True
+            )
+    st.markdown("### Query Key")
+    st.markdown(", ".join([f"**Q{i+1}**: <span style='color:{QUERY_PALETTE[i%len(QUERY_PALETTE)]}'>{html.escape(q)}</span>"
+                           for i, q in enumerate(queries)]) , unsafe_allow_html=True)
+
+    # ---------------- GPT-3.5 Rewrite (always available if API key present) ----------------
+    if st.session_state.get("openai_key", "").strip():
+        st.markdown("## GPT-3.5 Rewrite")
+        st.caption("Generate an improved version of your passage. We send the passage, queries, and high-level scores—no analytics beyond that.")
+        
+        with st.spinner("Calling GPT-3.5…"):
+            prompt = build_llm_prompt(
+                passage=passage,
+                queries=queries,
+                gzip_norm=gzip_norm,
+                semu_norm=semu_norm,
+                overlap_len=ov_len,
+                window_scores=win_scores,
+                brand_notes=st.session_state.get("brand_notes", "")
+            )
+            resp = call_gpt35(
+                api_key=st.session_state["openai_key"],
+                prompt=prompt,
+                temperature=float(st.session_state.get("gpt_temp", 0.2)),
+                model=st.session_state.get("gpt_model", GPT35_DEFAULT)
+            )
+        if "error" in resp:
+            st.error(resp["error"])
+        else:
+            reasoning = resp.get("reasoning", "")
+            rewrite = resp.get("rewrite", "")
+            st.markdown("### Model's reasoning (summary)")
+            if isinstance(reasoning, list):
+                st.markdown("\n".join([f"- {html.escape(x)}" for x in reasoning]), unsafe_allow_html=True)
+            else:
+                st.markdown(textwrap.indent(str(reasoning), "- "), unsafe_allow_html=False)
+
+            st.markdown("### Rewritten passage")
+            st.text_area("Rewrite", value=rewrite, height=220)
+
+            st.markdown("### Diff vs original")
+            render_diff(passage, rewrite)
     else:
-        reasoning = resp.get("reasoning", "")
-        rewrite   = resp.get("rewrite", "")
-
-        st.markdown("### Model’s reasoning (summary)")
-        if isinstance(reasoning, list):
-            st.markdown("\n".join([f"- {html.escape(x)}" for x in reasoning]), unsafe_allow_html=True)
-        elif reasoning:
-            st.markdown(textwrap.indent(str(reasoning), "- "), unsafe_allow_html=False)
-
-        st.markdown("### Rewritten passage")
-        st.text_area("Rewrite", value=rewrite, height=220)
-
-        st.markdown("### Diff vs original")
-        render_diff(passage, rewrite)
+        st.info("Paste an OpenAI API key in the sidebar to enable the GPT-3.5 rewrite feature.")
