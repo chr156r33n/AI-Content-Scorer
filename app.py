@@ -262,16 +262,64 @@ st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="
 st.title("Semantic Overlap & Density — FastEmbed (no Torch)")
 st.caption("CPU-only ONNX embeddings with clear annotations: per-window colors, unique-word highlights, legend & summary.")
 
+# Add info section
+with st.expander("ℹ️ How to use this tool", expanded=False):
+    st.markdown("""
+    **This tool analyzes how well your content matches specific search queries using AI embeddings.**
+    
+    **How it works:**
+    1. **Enter your content** in the left text area
+    2. **Add search queries** in the right text area (one per line)
+    3. **Click 'Score Passage'** to analyze
+    4. **View results:**
+       - **Colored borders** show windows with high query relevance
+       - **Green bold text** highlights unique words (appear only once)
+       - **Score badges** show relevance scores and contributing queries
+       - **Metrics** provide overall content quality scores
+    
+    **Understanding the scores:**
+    - **Gzip (density)**: How compressible the text is (lower = more unique content)
+    - **Semantic Uniques**: Percentage of unique content words
+    - **Overlap (relevance)**: How well content matches your queries
+    - **Content Balance Score**: Overall quality combining all factors
+    
+    **Tips:**
+    - Use specific, relevant search terms for better matching
+    - Adjust window size and stride to fine-tune analysis granularity
+    - Higher border threshold shows only the most relevant sections
+    """)
+
 with st.sidebar:
+    st.markdown("### Configuration")
+    
     model_name = st.selectbox(
-        "Embedding model",
+        "Embedding Model",
         ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"],
         index=0,
+        help="Choose the AI model for semantic analysis. BAAI/bge-small-en-v1.5 is faster and more accurate for English text."
     )
-    win_size = st.slider("Sentence window size", 1, 6, 3)
-    stride   = st.slider("Window stride", 1, 6, 2)
-    border_thresh = st.slider("Window border threshold", 0.0, 1.0, float(MIN_WINDOW_BORDER_SCORE), 0.05,
-                              help="Borders show only if score ≥ threshold. Badges always show.")
+    
+    st.markdown("### Window Settings")
+    
+    win_size = st.slider(
+        "Sentence Window Size", 
+        1, 6, 3,
+        help="Number of sentences grouped together for analysis. Larger windows capture more context but may miss fine details."
+    )
+    
+    stride = st.slider(
+        "Window Stride", 
+        1, 6, 2,
+        help="How many sentences to skip between windows. Smaller stride = more overlap, larger stride = less overlap."
+    )
+    
+    st.markdown("### Display Settings")
+    
+    border_thresh = st.slider(
+        "Window Border Threshold", 
+        0.0, 1.0, float(MIN_WINDOW_BORDER_SCORE), 0.05,
+        help="Only show colored borders for windows with scores above this threshold. Score badges always show regardless."
+    )
     MIN_WINDOW_BORDER_SCORE = border_thresh  # reflect live
 
 colA, colB = st.columns([1,1])
@@ -303,11 +351,36 @@ if st.button("Score Passage"):
         final = geometric_mean([gzip_norm, semu_norm, ov_len])
 
     # Metrics
+    st.markdown("### Content Analysis Results")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Gzip (density, norm)", f"{gzip_norm:.2f}")
-    m2.metric("Semantic Uniques (norm)", f"{semu_norm:.2f}")
-    m3.metric("Overlap (relevance)",    f"{ov_len:.2f}")
-    m4.metric("Content Balance Score",  f"{final:.2f}")
+    
+    with m1:
+        st.metric(
+            "Gzip Density", 
+            f"{gzip_norm:.2f}",
+            help="How compressible the text is. Lower values indicate more unique, diverse content."
+        )
+    
+    with m2:
+        st.metric(
+            "Semantic Uniques", 
+            f"{semu_norm:.2f}",
+            help="Percentage of unique content words. Higher values indicate more diverse vocabulary."
+        )
+    
+    with m3:
+        st.metric(
+            "Query Relevance", 
+            f"{ov_len:.2f}",
+            help="How well the content matches your search queries. Higher values indicate better semantic alignment."
+        )
+    
+    with m4:
+        st.metric(
+            "Overall Quality", 
+            f"{final:.2f}",
+            help="Combined score balancing density, uniqueness, and query relevance. Higher is better."
+        )
 
     if tok_count < 25:
         st.info("Very short passages (< 25 tokens) can be unstable.")
