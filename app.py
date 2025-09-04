@@ -530,7 +530,7 @@ QUERIES:
 
 CURRENT METRICS:
 - Density (gzip_norm): {gzip_norm:.2f}
-- Uniques (semu_norm): {semun_norm:.2f}
+- Uniques (semu_norm): {semu_norm:.2f}
 - Overlap (overlap): {overlap_len:.2f}
 
 WINDOW SUMMARY (strongest spans):
@@ -699,7 +699,7 @@ if st.button("Score Passage"):
     # --- Metrics ---
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Gzip (density, norm)", f"{gzip_norm:.2f}")
-    m2.metric("Semantic Uniques (norm)", f"{semun_norm:.2f}")
+    m2.metric("Semantic Uniques (norm)", f"{semu_norm:.2f}")
     m3.metric("Overlap (relevance)",    f"{ov_len:.2f}")
     m4.metric("Content Balance Score",  f"{final:.2f}")
 
@@ -818,7 +818,7 @@ if st.button("Score Passage"):
                     passage=passage,
                     queries=queries,
                     gzip_norm=gzip_norm,
-                    semu_norm=semun_norm,
+                    semu_norm=semu_norm,
                     overlap_len=ov_len,
                     window_scores=win_scores,
                     brand_notes=st.session_state.get("brand_notes", "")
