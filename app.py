@@ -147,7 +147,10 @@ def render_highlighted(passage: str, window_scores):
             window_html = f"<div style='{color_for_score(score)}; display: inline;'>{window_text}{annotation}</div>"
             result = result[:start] + window_html + result[end:]
     
-    return resultst.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
+    return result
+
+# ---- UI ----
+st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
 st.title("Semantic Overlap & Density — FastEmbed (no Torch)")
 st.caption("CPU-only ONNX embeddings. Quick startup, solid quality. Great for local/air-gapped use.")
 
