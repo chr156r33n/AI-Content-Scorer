@@ -562,47 +562,44 @@ if st.button("Score Passage"):
                            for i, q in enumerate(queries)]) , unsafe_allow_html=True)
 
 
-# ---------------- GPT-3.5 Rewrite (always available if API key present) ----------------
-if st.session_state.get("openai_key", "").strip():
-    st.markdown("## GPT-3.5 Rewrite")
-    st.caption("Generate an improved version of your passage. We send the passage, queries, and high-level scores—no analytics beyond that.")
-    
-    # Check if we have the required data from a previous analysis
-    if "gzip_norm" in st.session_state and "semu_norm" in st.session_state and "ov_len" in st.session_state:
-        if st.button("Generate GPT-3.5 Rewrite"):
-            with st.spinner("Calling GPT-3.5…"):
-                prompt = build_llm_prompt(
-                    passage=st.session_state.get("passage_text", ""),
-                    queries=st.session_state.get("queries_text", "").splitlines()[:MAX_QUERIES],
-                    gzip_norm=st.session_state["gzip_norm"],
-                    semu_norm=st.session_state["semu_norm"],
-                    overlap_len=st.session_state["ov_len"],
-                    window_scores=st.session_state.get("win_scores", []),
-                    brand_notes=st.session_state.get("brand_notes", "")
-                )
-                resp = call_gpt35(
-                    api_key=st.session_state["openai_key"],
-                    prompt=prompt,
-                    temperature=float(st.session_state.get("gpt_temp", 0.2)),
-                    model=st.session_state.get("gpt_model", GPT35_DEFAULT)
-                )
-            if "error" in resp:
-                st.error(resp["error"])
-            else:
-                reasoning = resp.get("reasoning", "")
-                rewrite = resp.get("rewrite", "")
-                st.markdown("### Model's reasoning (summary)")
-                if isinstance(reasoning, list):
-                    st.markdown("\n".join([f"- {html.escape(x)}" for x in reasoning]), unsafe_allow_html=True)
-                else:
-                    st.markdown(textwrap.indent(str(reasoning), "- "), unsafe_allow_html=False)
 
-                st.markdown("### Rewritten passage")
-                st.text_area("Rewrite", value=rewrite, height=220)
-
-                st.markdown("### Diff vs original")
-                render_diff(st.session_state.get("passage_text", ""), rewrite)
+    # ---------------- GPT-3.5 Rewrite (always available if API key present) ----------------
+    if st.session_state.get("openai_key", "").strip():
+        st.markdown("## GPT-3.5 Rewrite")
+        st.caption("Generate an improved version of your passage. We send the passage, queries, and high-level scores—no analytics beyond that.")
+        
     else:
-        st.info("Run 'Score Passage' first to analyze your content, then use this rewrite feature.")
-else:
-    st.info("Paste an OpenAI API key in the sidebar to enable the GPT-3.5 rewrite feature.")
+        st.info("Paste an OpenAI API key in the sidebar to enable the GPT-3.5 rewrite feature.")
+        
+        with st.spinner("Calling GPT-3.5…"):
+            prompt = build_llm_prompt(
+                passage=passage,
+                queries=queries,
+                gzip_norm=gzip_norm,
+                semu_norm=semu_norm,
+                overlap_len=ov_len,
+                window_scores=win_scores,
+                brand_notes=st.session_state.get("brand_notes", "")
+            )
+            resp = call_gpt35(
+                api_key=st.session_state["openai_key"],
+                prompt=prompt,
+                temperature=float(st.session_state.get("gpt_temp", 0.2)),
+                model=st.session_state.get("gpt_model", GPT35_DEFAULT)
+            )
+        if "error" in resp:
+            st.error(resp["error"])
+        else:
+            reasoning = resp.get("reasoning", "")
+            rewrite = resp.get("rewrite", "")
+            st.markdown("### Model's reasoning (summary)")
+            if isinstance(reasoning, list):
+                st.markdown("\n".join([f"- {html.escape(x)}" for x in reasoning]), unsafe_allow_html=True)
+            else:
+                st.markdown(textwrap.indent(str(reasoning), "- "), unsafe_allow_html=False)
+
+            st.markdown("### Rewritten passage")
+            st.text_area("Rewrite", value=rewrite, height=220)
+
+            st.markdown("### Diff vs original")
+            render_diff(passage, rewrite)
