@@ -477,6 +477,20 @@ with st.sidebar:
         index=init_state("model_idx", 0))
     st.session_state["model_idx"] = ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"].index(model_name)
 
+    st.markdown("### Windowing")
+    win_size = st.slider("Sentence window size", 1, 6, init_state("win_size", 3))
+    st.session_state["win_size"] = win_size
+    stride   = st.slider("Window stride", 1, 6, init_state("stride", 2))
+    st.session_state["stride"] = stride
+
+    border_thresh = st.slider("Window border threshold", 0.0, 1.0, init_state("border_thresh", float(MIN_WINDOW_BORDER_SCORE)), 0.05)
+    st.session_state["border_thresh"] = border_thresh
+    MIN_WINDOW_BORDER_SCORE = border_thresh
+
+    st.markdown("### Overlays")
+    show_filler = st.checkbox("Highlight filler/hedging", value=init_state("show_filler", True))
+    st.session_state["show_filler"] = show_filler
+
     st.markdown("### Optional: OpenAI GPT Rewrite")
     openai_key = st.text_input("OpenAI API Key", type="password", value=init_state("openai_key", ""))
     st.session_state["openai_key"] = openai_key
@@ -495,21 +509,6 @@ with st.sidebar:
     brand_notes = st.text_area("Brand guardrails (tone, style, banned words, etc.)",
                                value=init_state("brand_notes", ""))
     st.session_state["brand_notes"] = brand_notes
-
-    st.markdown("### Windowing")
-    win_size = st.slider("Sentence window size", 1, 6, init_state("win_size", 3))
-    st.session_state["win_size"] = win_size
-    stride   = st.slider("Window stride", 1, 6, init_state("stride", 2))
-    st.session_state["stride"] = stride
-
-    border_thresh = st.slider("Window border threshold", 0.0, 1.0, init_state("border_thresh", float(MIN_WINDOW_BORDER_SCORE)), 0.05)
-    st.session_state["border_thresh"] = border_thresh
-    MIN_WINDOW_BORDER_SCORE = border_thresh
-
-    st.markdown("### Overlays")
-    show_filler = st.checkbox("Highlight filler/hedging", value=init_state("show_filler", True))
-    st.session_state["show_filler"] = show_filler
-
 # Inputs
 colA, colB = st.columns([1,1])
 with colA:
@@ -563,6 +562,38 @@ if st.button("Score Passage"):
         st.info("Very short passages (< 25 tokens) can be unstable.")
 
     st.markdown("---")
+
+    # --- Annotated passage ---
+    st.subheader("Annotated Passage")
+    html_block = render_passage(
+        passage=passage,
+        window_scores=win_scores,
+        wins=wins,
+        sims=sims,
+        queries=queries,
+        show_per_query_stripes=True,
+        show_filler_flags=st.session_state.get("show_filler", True),
+        overstuff_threshold=2,
+        show_windows=True
+    )
+    st.markdown("<div style='line-height:1.8; font-size:1.05rem;'>"+html_block+"</div>", unsafe_allow_html=True)
+
+    # Legend + Query key
+    st.markdown("### Legend")
+    legend_cols = st.columns(min(4, max(1, len(win_scores))))
+    for i, ws in enumerate(win_scores):
+        _, _, score, contrib, _ = ws
+        color = WINDOW_PALETTE[i % len(WINDOW_PALETTE)]
+        with legend_cols[i % len(legend_cols)]:
+            st.markdown(
+                f"<div style='display:inline-block;width:14px;height:14px;background:{color};"
+                f"border-radius:2px;margin-right:8px;vertical-align:middle;'></div>"
+                f"<span><b>W{i+1}</b> (score {score:.2f})</span>",
+                unsafe_allow_html=True
+            )
+    st.markdown("### Query Key")
+    st.markdown(", ".join([f"**Q{i+1}**: <span style='color:{QUERY_PALETTE[i%len(QUERY_PALETTE)]}'>{html.escape(q)}</span>"
+                           for i, q in enumerate(queries)]) , unsafe_allow_html=True)
 
     # ---------------- OpenAI GPT Rewrite (always available if API key present) ----------------
     if st.session_state.get("openai_key", "").strip():
@@ -627,15 +658,15 @@ if st.button("Score Passage"):
             
             with col2:
                 st.markdown("**OpenAI GPT Rewrite**")
-                gzip_delta = rewrite_scores[gzip_norm] - gzip_norm
-                semu_delta = rewrite_scores[semu_norm] - semu_norm
-                ov_delta = rewrite_scores[ov_len] - ov_len
-                final_delta = rewrite_scores[final] - final
+                gzip_delta = rewrite_scores['gzip_norm'] - gzip_norm
+                semu_delta = rewrite_scores['semu_norm'] - semu_norm
+                ov_delta = rewrite_scores['ov_len'] - ov_len
+                final_delta = rewrite_scores['final'] - final
                 
-                st.metric("Gzip (density)", f"{rewrite_scores[gzip_norm]:.2f}", delta=f"{gzip_delta:+.2f}")
-                st.metric("Semantic Uniques", f"{rewrite_scores[semu_norm]:.2f}", delta=f"{semu_delta:+.2f}")
-                st.metric("Overlap (relevance)", f"{rewrite_scores[ov_len]:.2f}", delta=f"{ov_delta:+.2f}")
-                st.metric("Content Balance", f"{rewrite_scores[final]:.2f}", delta=f"{final_delta:+.2f}")
+                st.metric("Gzip (density)", f"{rewrite_scores['gzip_norm']:.2f}", delta=f"{gzip_delta:+.2f}")
+                st.metric("Semantic Uniques", f"{rewrite_scores['semu_norm']:.2f}", delta=f"{semu_delta:+.2f}")
+                st.metric("Overlap (relevance)", f"{rewrite_scores['ov_len']:.2f}", delta=f"{ov_delta:+.2f}")
+                st.metric("Content Balance", f"{rewrite_scores['final']:.2f}", delta=f"{final_delta:+.2f}")
             
             # Summary of improvements
             improvements = []
@@ -655,36 +686,3 @@ if st.button("Score Passage"):
             render_diff(passage, rewrite)
     else:
         st.info("Paste an OpenAI API key in the sidebar to enable the OpenAI GPT rewrite feature.")
-
-    # --- Annotated passage ---
-    st.subheader("Annotated Passage")
-    html_block = render_passage(
-        passage=passage,
-        window_scores=win_scores,
-        wins=wins,
-        sims=sims,
-        queries=queries,
-        show_per_query_stripes=True,
-        show_filler_flags=st.session_state.get("show_filler", True),
-        overstuff_threshold=2,
-        show_windows=True
-    )
-    st.markdown("<div style='line-height:1.8; font-size:1.05rem;'>"+html_block+"</div>", unsafe_allow_html=True)
-
-    # Legend + Query key
-    st.markdown("### Legend")
-    legend_cols = st.columns(min(4, max(1, len(win_scores))))
-    for i, ws in enumerate(win_scores):
-        _, _, score, contrib, _ = ws
-        color = WINDOW_PALETTE[i % len(WINDOW_PALETTE)]
-        with legend_cols[i % len(legend_cols)]:
-            st.markdown(
-                f"<div style='display:inline-block;width:14px;height:14px;background:{color};"
-                f"border-radius:2px;margin-right:8px;vertical-align:middle;'></div>"
-                f"<span><b>W{i+1}</b> (score {score:.2f})</span>",
-                unsafe_allow_html=True
-            )
-    st.markdown("### Query Key")
-    st.markdown(", ".join([f"**Q{i+1}**: <span style='color:{QUERY_PALETTE[i%len(QUERY_PALETTE)]}'>{html.escape(q)}</span>"
-                           for i, q in enumerate(queries)]) , unsafe_allow_html=True)
-

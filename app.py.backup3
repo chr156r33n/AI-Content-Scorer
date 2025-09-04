@@ -477,6 +477,20 @@ with st.sidebar:
         index=init_state("model_idx", 0))
     st.session_state["model_idx"] = ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"].index(model_name)
 
+    st.markdown("### Windowing")
+    win_size = st.slider("Sentence window size", 1, 6, init_state("win_size", 3))
+    st.session_state["win_size"] = win_size
+    stride   = st.slider("Window stride", 1, 6, init_state("stride", 2))
+    st.session_state["stride"] = stride
+
+    border_thresh = st.slider("Window border threshold", 0.0, 1.0, init_state("border_thresh", float(MIN_WINDOW_BORDER_SCORE)), 0.05)
+    st.session_state["border_thresh"] = border_thresh
+    MIN_WINDOW_BORDER_SCORE = border_thresh
+
+    st.markdown("### Overlays")
+    show_filler = st.checkbox("Highlight filler/hedging", value=init_state("show_filler", True))
+    st.session_state["show_filler"] = show_filler
+
     st.markdown("### Optional: OpenAI GPT Rewrite")
     openai_key = st.text_input("OpenAI API Key", type="password", value=init_state("openai_key", ""))
     st.session_state["openai_key"] = openai_key
@@ -495,21 +509,6 @@ with st.sidebar:
     brand_notes = st.text_area("Brand guardrails (tone, style, banned words, etc.)",
                                value=init_state("brand_notes", ""))
     st.session_state["brand_notes"] = brand_notes
-
-    st.markdown("### Windowing")
-    win_size = st.slider("Sentence window size", 1, 6, init_state("win_size", 3))
-    st.session_state["win_size"] = win_size
-    stride   = st.slider("Window stride", 1, 6, init_state("stride", 2))
-    st.session_state["stride"] = stride
-
-    border_thresh = st.slider("Window border threshold", 0.0, 1.0, init_state("border_thresh", float(MIN_WINDOW_BORDER_SCORE)), 0.05)
-    st.session_state["border_thresh"] = border_thresh
-    MIN_WINDOW_BORDER_SCORE = border_thresh
-
-    st.markdown("### Overlays")
-    show_filler = st.checkbox("Highlight filler/hedging", value=init_state("show_filler", True))
-    st.session_state["show_filler"] = show_filler
-
 # Inputs
 colA, colB = st.columns([1,1])
 with colA:
