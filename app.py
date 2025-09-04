@@ -562,91 +562,48 @@ if st.button("Score Passage"):
                            for i, q in enumerate(queries)]) , unsafe_allow_html=True)
 
 
-
-   # ---------------- GPT-3.5 Rewrite (runs only if API key present) ----------------
+# ---------------- GPT Rewrite (runs only on this Score Passage click) ----------------
 openai_key_clean = (st.session_state.get("openai_key") or "").strip()
 model_name_clean = (st.session_state.get("gpt_model", GPT35_DEFAULT) or GPT35_DEFAULT).strip()
-temperature_val = float(st.session_state.get("gpt_temp", 0.2))
+temperature_val  = float(st.session_state.get("gpt_temp", 0.2))
 
 st.markdown("---")
-st.markdown("## GPT-3.5 Rewrite")
+st.markdown("## GPT Rewrite")
 
 if not openai_key_clean:
-    st.info("Paste an OpenAI API key in the sidebar to enable the GPT-3.5 rewrite feature.")
+    st.info("Paste an OpenAI API key in the sidebar to enable the rewrite feature.")
 else:
-    st.caption(
-        "We send the passage, queries, and high-level scores to the model. "
-        "Results are displayed below and cached in session for convenience."
-    )
+    with st.spinner("Calling OpenAI…"):
+        prompt = build_llm_prompt(
+            passage=passage,
+            queries=queries,
+            gzip_norm=gzip_norm,       # <-- local vars computed earlier in this same click
+            semu_norm=semu_norm,
+            overlap_len=ov_len,
+            window_scores=win_scores,
+            brand_notes=st.session_state.get("brand_notes", "")
+        )
+        resp = call_gpt35(
+            api_key=openai_key_clean,
+            prompt=prompt,
+            temperature=temperature_val,
+            model=model_name_clean
+        )
 
-    # Build prompt now so we can show it in an expander if needed
-    prompt = build_llm_prompt(
-        passage=passage,
-        queries=queries,
-        gzip_norm=gzip_norm,
-        semu_norm=semu_norm,
-        overlap_len=ov_len,
-        window_scores=win_scores,
-        brand_notes=st.session_state.get("brand_notes", "")
-    )
-
-    # Call once per click; store in session, so it survives widget changes
-    do_rewrite = st.button("Generate rewrite with GPT-3.5", key="btn_gpt35")
-
-    if do_rewrite:
-        if not model_name_clean:
-            model_name_clean = GPT35_DEFAULT  # fallback if user clears the field
-        with st.spinner("Calling OpenAI…"):
-            resp = call_gpt35(
-                api_key=openai_key_clean,
-                prompt=prompt,
-                temperature=temperature_val,
-                model=model_name_clean
-            )
-        st.session_state["last_gpt_resp"] = resp
-        st.session_state["last_gpt_prompt"] = prompt
-
-    # Use latest response if present
-    resp = st.session_state.get("last_gpt_resp", None)
-
-    if isinstance(resp, dict) and "error" in resp:
+    if "error" in resp:
         st.error(resp["error"])
-    elif isinstance(resp, dict) and resp:
-        # Accept either proper JSON keys or a plain string fallback
-        reasoning = resp.get("reasoning", "")
-        rewrite = resp.get("rewrite", "")
-
-        # If the model ignored JSON formatting and returned a plain string, salvage it
-        if not rewrite and isinstance(reasoning, str) and not isinstance(resp.get("rewrite"), str):
-            rewrite = reasoning
-            reasoning = "Model returned plain text; showing it as the rewrite."
-
-        # If both are empty, try to show raw object (rare edge case)
-        if not rewrite and not reasoning:
-            st.warning("The model replied but didn’t include expected keys. Showing raw response below.")
-            st.code(json.dumps(resp, indent=2), language="json")
-
-        # Reasoning
-        if reasoning:
-            st.markdown("### Model’s reasoning (summary)")
-            if isinstance(reasoning, list):
-                st.markdown("\n".join([f"- {html.escape(x)}" for x in reasoning]), unsafe_allow_html=True)
-            else:
-                st.markdown(textwrap.indent(str(reasoning), "- "), unsafe_allow_html=False)
-
-        # Rewrite + diff
-        if rewrite:
-            st.markdown("### Rewritten passage")
-            st.text_area("Rewrite", value=rewrite, height=220, key="rewrite_textarea")
-
-            st.markdown("### Diff vs original")
-            render_diff(passage, rewrite)
-
-        with st.expander("Debug: last prompt & payload", expanded=False):
-            st.markdown("**Model:** " + model_name_clean)
-            st.markdown("**Temperature:** " + str(temperature_val))
-            st.code(st.session_state.get("last_gpt_prompt", "")[:8000])
     else:
-        # No response yet (first load or before pressing the button)
-        if openai_key_clean:
-            st.info("Click **Generate rewrite with GPT-3.5** to produce a suggestion.")
+        reasoning = resp.get("reasoning", "")
+        rewrite   = resp.get("rewrite", "")
+
+        st.markdown("### Model’s reasoning (summary)")
+        if isinstance(reasoning, list):
+            st.markdown("\n".join([f"- {html.escape(x)}" for x in reasoning]), unsafe_allow_html=True)
+        elif reasoning:
+            st.markdown(textwrap.indent(str(reasoning), "- "), unsafe_allow_html=False)
+
+        st.markdown("### Rewritten passage")
+        st.text_area("Rewrite", value=rewrite, height=220)
+
+        st.markdown("### Diff vs original")
+        render_diff(passage, rewrite)
