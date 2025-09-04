@@ -110,10 +110,23 @@ def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-e
     
     q_labels = [f"Q{i+1}" for i in range(len(queries))]
     w_labels = [f"W{i+1}" for i in range(len(wins))]
+def get_unique_words(text: str) -> set:
+    """Get set of unique content words (non-stop, ≥3 chars, appearing only once)"""
+    toks = tokenize(text)
+    ctoks = content_tokens(toks)
+    # Count occurrences of each content token
+    from collections import Counter
+    counts = Counter(ctoks)
+    # Return only words that appear exactly once and are ≥3 chars
+    return {word for word, count in counts.items() if count == 1 and len(word) >= 3}
     return overlap_len, window_scores, sims, q_labels, w_labels
 def color_for_score(v: float) -> str:
     v = max(0.0, min(1.0, v))
 def render_highlighted(passage: str, window_scores):
+    # Convert score to border width (0-3px) and opacity
+    width = max(1, int(v * 3))  # 1-3px border width
+    opacity = max(0.3, v)       # 30%-100% opacity
+    return f"border: {width}px dotted rgba(255, 0, 0, {opacity:.2f}); padding: 4px 6px; margin: 2px;"
     if not passage: return ""
     
     # Get unique words for blue highlighting
