@@ -98,7 +98,7 @@ def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-e
 
 def color_for_score(v: float) -> str:
     v = max(0.0, min(1.0, v))
-    base = np.array([255,255,255], float); target = np.array([255,213,79], float)
+    base = np.array([173, 216, 230], float); target = np.array([255, 255, 0], float)
     rgb = (base + v*(target-base)).astype(int)
     return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
 
@@ -134,8 +134,6 @@ with st.sidebar:
     )
     win_size = st.slider("Sentence window size", 1, 6, 3)
     stride   = st.slider("Window stride", 1, 6, 2)
-    st.markdown("---")
-    st.write("Tip: First call downloads a small ONNX model; later runs are instant.")
 
 colA, colB = st.columns([1,1])
 with colA:
