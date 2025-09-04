@@ -124,40 +124,41 @@ def render_highlighted(passage: str, window_scores):
         s, e = max(0,s), min(len(passage), e)
         if e > s: scores[s:e] = np.maximum(scores[s:e], v)
     
-    html, i = [], 0
-    buck = lambda x: round(x, 2)
-    while i < len(passage):
-        b = buck(scores[i]); j = i+1
-        while j < len(passage) and buck(scores[j]) == b: j += 1
-        seg = (passage[i:j].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
+    # Process text word by word using regex substitution
+    import re
+    
+    def replace_word(match):
+        word = match.group(0)
+        word_lower = word.lower()
         
-        # Check if this segment contains unique words
-        seg_lower = seg.lower()
-        # Extract actual words from segment for precise matching
-        import re
-        seg_words = re.findall(r"\b\w+\b", seg_lower)
-        # Only highlight if the segment is exactly a single unique word
-        # Count unique words in segment
-        unique_count = sum(1 for word in seg_words if word in unique_words)
-        is_unique = unique_count == 1 and len(seg_words) == 1
+        # Get score for this word position
+        start = match.start()
+        end = match.end()
+        word_score = np.max(scores[start:end]) if end <= len(scores) else 0.0
+        buck_score = round(word_score, 2)
         
-        if b > 0.1:  # High overlap score
-            annotation = f"<sup style='font-size:0.7em; color:#666;'>({b:.2f})</sup>"
+        # Check if it's a unique word
+        is_unique = word_lower in unique_words
+        
+        # Apply styling
+        if buck_score > 0.1:  # High overlap
+            annotation = f"<sup style='font-size:0.7em; color:#666;'>({buck_score:.2f})</sup>"
             if is_unique:
-                # Both high overlap AND unique - combine styling
-                html.append(f"<span style='{color_for_score(b)}; color: blue;'>{seg}{annotation}</span>")
+                return f"<span style='{color_for_score(buck_score)}; color: blue;'>{word}{annotation}</span>"
             else:
-                # Just high overlap
-                html.append(f"<span style='{color_for_score(b)}'>{seg}{annotation}</span>")
+                return f"<span style='{color_for_score(buck_score)}'>{word}{annotation}</span>"
         elif is_unique:
-            # Just unique (no high overlap)
-            html.append(f"<span style='color: blue; font-weight: bold;'>{seg}</span>")
+            return f"<span style='color: blue; font-weight: bold;'>{word}</span>"
         else:
-            # Neither high overlap nor unique
-            html.append(seg)
-        i = j
-    return "".join(html)
-
+            return word
+    
+    # Replace all words with styled versions
+    result = re.sub(r'\b\w+\b', replace_word, passage)
+    
+    # Escape HTML entities
+    result = result.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    
+    return result
 # ---- UI ----
 st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
 st.title("Semantic Overlap & Density — FastEmbed (no Torch)")
