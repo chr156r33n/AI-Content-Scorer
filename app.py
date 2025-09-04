@@ -365,38 +365,35 @@ def build_llm_prompt(
     q_block = "\n".join([f"Q{i+1}: {q}" for i, q in enumerate(queries)])
     brand = f"\nBRAND GUARDRAILS:\n{brand_notes}\n" if brand_notes else ""
 
-    prompt = f"""You are an editor for web copy. Rewrite the passage to improve three axes while staying natural:
-- Relevance (semantic overlap with queries), 
-- Semantic Uniques (breadth),
-- Density (avoid fluff), keeping a balanced overall tone.
+    prompt = f"""You are an expert web copy editor. Analyze and improve this passage across three key dimensions: relevance, semantic diversity, and density. Provide detailed analysis and actionable suggestions.
 
-Constraints:
-- Keep it concise, skimmable, and on brand.
-- Avoid keyword stuffing; use natural variations.
-- Keep meaning accurate; no fabricated facts.
-- Use simple language (aim B2 reading level).
-- Keep ~10–25% shorter if possible, unless brevity harms relevance.{brand}
+ANALYSIS FRAMEWORK:
+- Relevance: How well does the content address the target queries?
+- Semantic Uniques: Does it use varied, specific vocabulary?
+- Density: Is it concise without unnecessary filler?
+- Overall Balance: Does it maintain natural flow while optimizing metrics?{brand}
 
-QUERIES:
+TARGET QUERIES:
 {q_block}
 
-CURRENT METRICS:
-- Density (gzip_norm): {gzip_norm:.2f}
-- Uniques (semu_norm): {semu_norm:.2f}
-- Overlap (overlap): {overlap_len:.2f}
+CURRENT PERFORMANCE:
+- Density Score: {gzip_norm:.2f} (lower = more concise)
+- Semantic Uniques: {semu_norm:.2f} (higher = more varied vocabulary)
+- Query Relevance: {overlap_len:.2f} (higher = better query coverage)
 
-WINDOW SUMMARY (strongest spans):
+CONTENT ANALYSIS:
 {ws_block}
 
-PASSAGE (rewrite this):
-\"\"\"{passage[:6000]}\"\"\"  # truncated for context safety
+PASSAGE TO IMPROVE:
+{passage[:6000]}
 
-Return JSON with keys:
-- "reasoning": 2–4 bullets stating what you changed and why.
-- "rewrite": the improved passage only.
+Return JSON with these keys:
+- "detailed_analysis": A comprehensive 3-4 paragraph analysis of the current content, identifying specific strengths, weaknesses, and opportunities for improvement.
+- "suggestions_table": A table with 5-8 specific, actionable suggestions. Each row should have: "Issue", "Current Text", "Suggested Change", "Reason". Use markdown table format.
+- "reasoning": 3-4 bullet points explaining the key changes made in the rewrite and why they improve the metrics.
+- "rewrite": The improved passage that addresses the identified issues while maintaining natural flow.
 """
     return prompt
-
 def call_gpt35(api_key: str, prompt: str, temperature: float = 0.2, model: str = GPT35_DEFAULT) -> Dict:
     headers = {
         "Authorization": f"Bearer {api_key.strip()}",
@@ -597,18 +594,28 @@ if st.button("Score Passage"):
         if "error" in resp:
             st.error(resp["error"])
         else:
+            detailed_analysis = resp.get("detailed_analysis", "")
+            suggestions_table = resp.get("suggestions_table", "")
             reasoning = resp.get("reasoning", "")
             rewrite = resp.get("rewrite", "")
-            st.markdown("### Model's reasoning (summary)")
+            
+            st.markdown("### Detailed Analysis")
+            st.markdown(detailed_analysis)
+            
+            if suggestions_table:
+                st.markdown("### Actionable Suggestions")
+                st.markdown(suggestions_table, unsafe_allow_html=True)
+            
+            st.markdown("### Key Changes Made")
             if isinstance(reasoning, list):
-                st.markdown("\n".join([f"- {html.escape(x)}" for x in reasoning]), unsafe_allow_html=True)
+                st.markdown("n".join([f"- {html.escape(x)}" for x in reasoning]), unsafe_allow_html=True)
             else:
                 st.markdown(textwrap.indent(str(reasoning), "- "), unsafe_allow_html=False)
 
-            st.markdown("### Rewritten passage")
+            st.markdown("### Rewritten Passage")
             st.text_area("Rewrite", value=rewrite, height=220)
 
-            st.markdown("### Diff vs original")
+            st.markdown("### Diff vs Original")
             render_diff(passage, rewrite)
     else:
         st.info("Paste an OpenAI API key in the sidebar to enable the GPT-3.5 rewrite feature.")
