@@ -1,6 +1,4 @@
 streamlit==1.37.0
 numpy>=1.23
-pandas>=1.5
 fastembed>=0.3.2
 onnxruntime>=1.17
-matplotlib>=3.8

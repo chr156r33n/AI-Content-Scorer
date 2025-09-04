@@ -1,9 +1,8 @@
-import math, gzip, io, re
+import math, gzip, io, re, html
 from typing import List, Tuple
+from collections import Counter, defaultdict
 import numpy as np
 import streamlit as st
-import html
-from collections import defaultdict
 
 # ---- Fast, torch-free embeddings ----
 from fastembed import TextEmbedding
@@ -13,11 +12,13 @@ def get_embedder(model_name: str = "BAAI/bge-small-en-v1.5"):
     # First call downloads a small ONNX (~50–90MB) into HF cache; later runs are instant
     return TextEmbedding(model_name=model_name)
 
+# ----------------- Text utils -----------------
 STOP = {"the","a","an","and","or","but","if","then","so","as","at","by","for","in","of","on","to","with",
         "is","are","was","were","be","been","being","it","its","this","that","these","those","we","you",
         "your","our","their","from","over","into","out","up","down","about","than","too","very"}
 TOKEN_SPLIT = re.compile(r"[^\w'-]+", re.UNICODE)
 SENT_SPLIT  = re.compile(r"(?<=[.!?])\s+")
+WORD_RE     = re.compile(r"\b\w+\b")
 
 def tokenize(t: str) -> List[str]:
     return [x for x in TOKEN_SPLIT.split(t.lower()) if x]
@@ -35,8 +36,9 @@ def gzip_ratio(text: str) -> float:
 def semantic_uniques_score(text: str) -> Tuple[float,int,int,int]:
     toks = tokenize(text)
     ctoks = content_tokens(toks)
-    uniques = {t for t in ctoks if len(t) >= 3}
-    score = (len(uniques)/max(1,len(ctoks))) if ctoks else 0.0
+    counts = Counter(ctoks)
+    uniques = {w for w,c in counts.items() if c == 1 and len(w) >= 3}
+    score = (len(uniques) / max(1, len(ctoks))) if ctoks else 0.0
     return score, len(toks), len(ctoks), len(uniques)
 
 def squash_01(x: float) -> float:
@@ -64,212 +66,192 @@ def sliding_windows(sents, win_size=3, stride=2):
         wins.append((start, end, " ".join([c[2] for c in chunk])))
     return wins
 
+# ----------------- Embeddings -----------------
 def embed_fastembed(texts: List[str], model_name="BAAI/bge-small-en-v1.5") -> np.ndarray:
     model = get_embedder(model_name)
-    # FastEmbed returns a generator of vectors
-    vecs = np.stack(list(model.embed(texts))).astype(np.float32)
-    # L2-normalize for cosine
+    vecs = np.stack(list(model.embed(texts))).astype(np.float32)  # generator -> array
     norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12
-    return vecs / norms
+    return vecs / norms  # L2-normalized
 
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    return a @ b.T  # already normalized
+    return a @ b.T  # normalized dot = cosine
 
 def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-en-v1.5",
                   win_size=3, stride=2):
+    """
+    Returns:
+      overlap_len (float),
+      window_scores: list of (start, end, max_sim, contributing_queries[(q_idx, query, score), ...]),
+      sims (Q x W),
+      q_labels, w_labels
+    """
     sents = split_sents(passage)
     wins = sliding_windows(sents, win_size=win_size, stride=stride) or [(0, len(passage), passage)]
     w_texts = [w[2] for w in wins]; w_spans = [(w[0], w[1]) for w in wins]
 
     vecs = embed_fastembed(queries + w_texts, model_name=model_name)
     q_vecs, w_vecs = vecs[:len(queries)], vecs[len(queries):]
-    sims = cosine_sim(q_vecs, w_vecs) if len(queries) and len(w_texts) else np.zeros((0,0))
+    sims = cosine_sim(q_vecs, w_vecs) if (len(queries) and len(w_texts)) else np.zeros((0,0))
 
     per_q_max = np.max(sims, axis=1) if sims.size else np.array([0.0]*len(queries))
     overlap_raw = float(np.mean(per_q_max)) if len(per_q_max) else 0.0
 
     tokens = len(tokenize(passage))
-    length_factor = min(1.0, math.log1p(tokens)/math.log1p(40.0))
+    length_factor = min(1.0, math.log1p(tokens) / math.log1p(40.0))
     overlap_len = max(0.0, min(1.0, overlap_raw * length_factor))
 
     per_win_max = np.max(sims, axis=0) if sims.size else np.zeros(len(wins))
-    
-    # Create detailed window scores with query breakdown
+
     window_scores = []
     for i, (span, max_score) in enumerate(zip(w_spans, per_win_max)):
-        # Find which queries contributed to this window's max score
-        contributing_queries = []
-        for j, query in enumerate(queries):
-            if sims.size and j < sims.shape[0] and i < sims.shape[1]:
-                query_score = sims[j, i]
-                if query_score >= max_score * 0.8:  # Include queries within 80% of max
-                    contributing_queries.append((j, query, query_score))
-        
-        # Sort by score descending
-        contributing_queries.sort(key=lambda x: x[2], reverse=True)
-        
-        window_scores.append((span[0], span[1], float(max_score), contributing_queries))
-    
+        contributing = []
+        if sims.size:
+            for j, q in enumerate(queries):
+                if i < sims.shape[1]:
+                    qscore = sims[j, i]
+                    # include queries within 80% of window's max
+                    if max_score > 0 and qscore >= max_score * 0.8:
+                        contributing.append((j, q, float(qscore)))
+        contributing.sort(key=lambda x: x[2], reverse=True)
+        window_scores.append((span[0], span[1], float(max_score), contributing))
+
     q_labels = [f"Q{i+1}" for i in range(len(queries))]
     w_labels = [f"W{i+1}" for i in range(len(wins))]
     return overlap_len, window_scores, sims, q_labels, w_labels
 
+# ----------------- Visual rendering -----------------
+def color_for_score(v: float) -> str:
+    """Dotted red border; thickness scales with score."""
+    v = max(0.0, min(1.0, v))
+    width = max(1, int(round(v * 3)))   # 1–3px
+    alpha = max(0.35, min(1.0, v))
+    return f"border: {width}px dotted rgba(255,0,0,{alpha:.2f}); padding: 2px 3px; border-radius: 2px;"
+
 def get_unique_words(text: str) -> set:
-    """Get set of unique content words (non-stop, ≥3 chars, appearing only once)"""
+    """Unique content words: non-stop, >=3 chars, appear exactly once (lowercased)."""
     toks = tokenize(text)
     ctoks = content_tokens(toks)
-    # Count occurrences of each content token
-    from collections import Counter
     counts = Counter(ctoks)
-    # Return only words that appear exactly once and are ≥3 chars
-    return {word for word, count in counts.items() if count == 1 and len(word) >= 3}
+    return {w for w,c in counts.items() if c == 1 and len(w) >= 3}
 
-def color_for_score(v: float) -> str:
-    v = max(0.0, min(1.0, v))
-    width = max(1, int(round(v * 3)))  # 1–3px
-    opacity = max(0.35, min(1.0, v))
-    return f"border: {width}px dotted rgba(255,0,0,{opacity:.2f}); padding: 2px 3px; border-radius: 2px;"
+def get_unique_word_spans(passage: str, unique_words: set) -> list[tuple[int,int]]:
+    """Return (start,end) spans for unique words (case-insensitive) in the original text."""
+    spans = []
+    for m in WORD_RE.finditer(passage):
+        if m.group(0).lower() in unique_words:
+            spans.append((m.start(), m.end()))
+    return spans
 
-_WORD = re.compile(r"\b\w+\b")
-
-def render_highlighted(passage: str, window_scores: List[Tuple]) -> str:
+def render_highlighted(passage: str, window_scores: List[Tuple[int,int,float,list]]) -> str:
     """
-    Renders the passage with:
-      - red dotted borders around each window span (can nest for overlaps)
-      - green bold for unique content words (only outside any window)
+    Event-based renderer:
+      - Red dotted borders around each window span (supports nesting/overlap)
+      - Green bold for unique words (applies everywhere, including inside windows)
     """
     if not passage:
         return ""
 
     unique_words = get_unique_words(passage)
+    uniq_spans    = get_unique_word_spans(passage, unique_words)
 
-    opens  = defaultdict(list)
-    closes = defaultdict(list)
+    # Build event maps: opens/closes at character positions
+    opens  = defaultdict(list)   # pos -> list of events
+    closes = defaultdict(list)   # pos -> list of events
+
+    # Window events (open outermost by higher score first)
     for (start, end, score, contrib) in window_scores:
         start = max(0, min(len(passage), start))
         end   = max(0, min(len(passage), end))
         if end <= start:
             continue
-        opens[start].append({"score": float(score), "contrib": contrib})
-        closes[end].append({"score": float(score), "contrib": contrib})
+        opens[start].append({"type": "win", "score": float(score), "contrib": contrib})
+        closes[end].append({"type": "win", "score": float(score), "contrib": contrib})
 
-    out = []
-    pos = 0
-    stack: List[dict] = []
+    # Unique word events
+    for (s, e) in uniq_spans:
+        opens[s].append({"type": "uniq"})
+        closes[e].append({"type": "uniq"})
 
     boundaries = sorted(set([0, len(passage)] + list(opens.keys()) + list(closes.keys())))
+    out = []
+    pos = 0
+    stack = []  # each item: {"type": "win"/"uniq", ...}
 
-    def emit_segment(s: str, window_depth: int):
-        # HTML-escape raw segment
-        esc = html.escape(s)
-        if window_depth == 0:
-            # Only outside windows, color unique words
-            def repl(m):
-                w = m.group(0)
-                return f"<span style='color:green; font-weight:600'>{w}</span>" if w.lower() in unique_words else w
-            esc = _WORD.sub(repl, esc)
-        out.append(esc)
+    def open_win(score: float):
+        out.append(f"<span style='{color_for_score(score)}'>")
 
-    for i, b in enumerate(boundaries):
-        # Flush text leading up to this boundary
+    def close_win(score: float, contrib):
+        parts = [f"Q{qi+1}:{qs:.2f}" for (qi, _q, qs) in (contrib[:2] if contrib else [])]
+        badge = f" ({score:.2f}" + (f" | {' | '.join(parts)}" if parts else "") + ")"
+        out.append(f"<sup style='font-size:0.7em; color:#666'>{html.escape(badge)}</sup>")
+        out.append("</span>")
+
+    def open_uniq():
+        out.append("<span style='color:green; font-weight:600'>")
+
+    def close_uniq():
+        out.append("</span>")
+
+    for b in boundaries:
+        # Emit plain text between last boundary and this boundary
         if b > pos:
-            emit_segment(passage[pos:b], window_depth=len(stack))
+            out.append(html.escape(passage[pos:b]))
             pos = b
 
-        # 3a) Close any windows ending here (LIFO to close innermost first)
-        if b in closes and closes[b]:
-            # Find how many to close that match current depth (by count)
-            # We close in reverse order of opens (stack order)
-            to_close = len(closes[b])
-            for _ in range(to_close):
-                if not stack:
-                    break
-                win = stack.pop()
-                # Optional: show a tiny score badge before closing
-                score = win.get("score", 0.0)
-                contrib = win.get("contrib", [])
-                # Top-2 query contributions as text like Q1:0.72 | Q3:0.66
-                if contrib:
-                    parts = [f"Q{q_idx+1}:{q_score:.2f}" for (q_idx, _q, q_score) in contrib[:2]]
-                    badge = f" ({score:.2f} | {' | '.join(parts)})"
-                else:
-                    badge = f" ({score:.2f})"
-                out.append(f"<sup style='font-size:0.7em; color:#666'>{html.escape(badge)}</sup>")
-                out.append("</span>")  # close the window box
+        # Close events at boundary: close uniques first (inner), then windows (outer)
+        if b in closes:
+            # close unique spans
+            for _ in [e for e in closes[b] if e["type"] == "uniq"]:
+                for i in range(len(stack)-1, -1, -1):
+                    if stack[i]["type"] == "uniq":
+                        stack.pop(i); close_uniq(); break
+            # close windows
+            for _ in [e for e in closes[b] if e["type"] == "win"]:
+                for i in range(len(stack)-1, -1, -1):
+                    if stack[i]["type"] == "win":
+                        win = stack.pop(i); close_win(win["score"], win.get("contrib")); break
 
-        # 3b) Open any windows starting here (open outermost first).
-        # If multiple start at same pos, open by descending score so stronger window is outer.
-        if b in opens and opens[b]:
-            for win in sorted(opens[b], key=lambda d: d["score"], reverse=True):
-                style = color_for_score(win["score"])
-                out.append(f"<span style='{style}'>")
-                stack.append(win)
+        # Open events at boundary: open windows first (outer), then uniques (inner)
+        if b in opens:
+            for ev in sorted([e for e in opens[b] if e["type"] == "win"],
+                             key=lambda d: d["score"], reverse=True):
+                open_win(ev["score"]); stack.append(ev)
+            for ev in [e for e in opens[b] if e["type"] == "uniq"]:
+                open_uniq(); stack.append(ev)
 
-    # If any windows left unclosed (shouldn't happen), close them
+    # Safety: close any unclosed tags
     while stack:
-        win = stack.pop()
-        score = win.get("score", 0.0)
-        out.append(f"<sup style='font-size:0.7em; color:#666'>({score:.2f})</sup></span>")
+        ev = stack.pop()
+        if ev["type"] == "uniq":
+            close_uniq()
+        else:
+            close_win(ev["score"], ev.get("contrib"))
 
     return "".join(out)
 
-    def color_unique_words(match):
-        word = match.group(0)
-        word_lower = word.lower()
-        if word_lower in unique_words:
-            return f"<span style='color: green; font-weight: bold;'>{word}</span>"
-        return word
-    
-    # Use a more sophisticated approach to avoid coloring inside window highlights
-    # Find all window highlight spans and mark their positions
-    span_pattern = r'<span style="[^"]*border:[^"]*"[^>]*>([^<]*)</span>'
-    spans = list(re.finditer(span_pattern, result))
-    
-    # Build result by processing text between spans
-    final_result = []
-    last_end = 0
-    
-    for span_match in spans:
-        # Add text before this span (with unique word coloring)
-        before_text = result[last_end:span_match.start()]
-        colored_before = re.sub(r'\b\w+\b', color_unique_words, before_text)
-        final_result.append(colored_before)
-        
-        # Add the span as-is (no unique word coloring inside)
-        final_result.append(span_match.group(0))
-        last_end = span_match.end()
-    
-    # Add remaining text after last span
-    remaining_text = result[last_end:]
-    colored_remaining = re.sub(r'\b\w+\b', color_unique_words, remaining_text)
-    final_result.append(colored_remaining)
-    
-    return ''.join(final_result)
-
-
-# ---- UI ----
+# ----------------- UI -----------------
 st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
 st.title("Semantic Overlap & Density — FastEmbed (no Torch)")
-st.caption("CPU-only ONNX embeddings. Quick startup, solid quality. Great for local/air-gapped use.")
+st.caption("CPU-only ONNX embeddings with clean visual annotations (windows + unique words).")
 
 with st.sidebar:
     model_name = st.selectbox(
         "Embedding model",
-        [
-            "BAAI/bge-small-en-v1.5",   # 384-dim, fast & accurate
-            "intfloat/e5-small-v2"      # another solid small model
-        ],
-        index=0
+        ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"],
+        index=0,
     )
     win_size = st.slider("Sentence window size", 1, 6, 3)
     stride   = st.slider("Window stride", 1, 6, 2)
 
 colA, colB = st.columns([1,1])
 with colA:
-    passage = st.text_area("Passage", height=220, placeholder="Paste your content here…")
+    passage = st.text_area("Passage", height=230, placeholder="Paste your content here…")
 with colB:
-    raw_queries = st.text_area("Queries (one per line, up to 10)", height=220,
-                               placeholder="e.g.\nluxury resort whistler\nski-in ski-out suites\nspa and wellness")
+    raw_queries = st.text_area(
+        "Queries (one per line, up to 10)",
+        height=230,
+        placeholder="e.g.\nluxury resort whistler\nski-in ski-out suites\nspa and wellness"
+    )
     queries = [q.strip() for q in raw_queries.splitlines() if q.strip()][:10]
 
 if st.button("Score Passage"):
@@ -281,14 +263,15 @@ if st.button("Score Passage"):
     with st.spinner("Embedding & scoring…"):
         gr = gzip_ratio(passage)
         semuniq, tok_count, ctok_count, uniq_count = semantic_uniques_score(passage)
-        gzip_adj   = gr / max(1e-9, math.log1p(tok_count))
-        gzip_norm  = squash_01(gzip_adj)
-        semu_norm  = squash_01(semuniq)
+        gzip_adj  = gr / max(1e-9, math.log1p(tok_count))
+        gzip_norm = squash_01(gzip_adj)
+        semu_norm = squash_01(semuniq)
         ov_len, win_scores, sims, q_labels, w_labels = overlap_embed(
             passage, queries, model_name=model_name, win_size=win_size, stride=stride
         )
         final = geometric_mean([gzip_norm, semu_norm, ov_len])
 
+    # Metrics
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Gzip (density, norm)", f"{gzip_norm:.2f}")
     m2.metric("Semantic Uniques (norm)", f"{semu_norm:.2f}")
@@ -299,12 +282,16 @@ if st.button("Score Passage"):
         st.info("Very short passages (< 25 tokens) can be unstable.")
 
     st.markdown("---")
-    st.subheader("Annotated Passage (overlap heat)")
-    st.markdown("<div style='line-height:1.8; font-size:1.05rem;'>"+render_highlighted(passage, win_scores)+"</div>",
-                unsafe_allow_html=True)
-
+    st.subheader("Annotated Passage")
+    st.markdown(
+        "<div style='line-height:1.8; font-size:1.05rem;'>"
+        + render_highlighted(passage, win_scores)
+        + "</div>",
+        unsafe_allow_html=True
+    )
 
     with st.expander("Details"):
         st.write(f"Raw gzip ratio: {gr:.4f}")
         st.write(f"Tokens: {tok_count} | Content tokens: {ctok_count} | Unique content tokens (≥3): {uniq_count}")
-        st.write("Window spans (char offsets) with max-overlap score:"); st.write(win_scores)
+        st.write("Window spans (char offsets) with max-overlap score & top queries:")
+        st.write(win_scores)
