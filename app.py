@@ -133,10 +133,18 @@ def render_highlighted(passage: str, window_scores: List[Tuple]) -> str:
     # Get unique words for green highlighting
     unique_words = get_unique_words(passage)
     
-    # Start with the original passage
-    result = passage
+    # First apply unique word coloring to the original passage
+    def color_unique_words(match):
+        word = match.group(0)
+        word_lower = word.lower()
+        if word_lower in unique_words:
+            return f"<span style='color: green; font-weight: bold;'>{word}</span>"
+        return word
     
-    # Apply window span highlighting with red dotted borders
+    # Apply unique word coloring to the original passage
+    result = re.sub(r'\b\w+\b', color_unique_words, passage)
+    
+    # Now apply window span highlighting with red dotted borders
     # Sort by start position and apply from end to beginning to avoid position shifts
     sorted_windows = sorted(window_scores, key=lambda x: x[0])
     
@@ -152,23 +160,7 @@ def render_highlighted(passage: str, window_scores: List[Tuple]) -> str:
             window_html = f"<span style='{color_for_score(score)}; display: inline-block;'>{window_text}{annotation}</span>"
             result = result[:start] + window_html + result[end:]
     
-    # Now apply unique word coloring using a simpler approach
-    # Split the result into parts and only apply coloring to non-HTML parts
-    parts = re.split(r'(<[^>]+>)', result)
-    
-    for i, part in enumerate(parts):
-        # Only process parts that are not HTML tags
-        if not part.startswith('<') or not part.endswith('>'):
-            def color_unique_words(match):
-                word = match.group(0)
-                word_lower = word.lower()
-                if word_lower in unique_words:
-                    return f"<span style='color: green; font-weight: bold;'>{word}</span>"
-                return word
-            
-            parts[i] = re.sub(r'\b\w+\b', color_unique_words, part)
-    
-    return ''.join(parts)
+    return result
 
 
 # ---- UI ----
