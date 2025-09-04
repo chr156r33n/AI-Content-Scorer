@@ -133,65 +133,38 @@ def render_highlighted(passage: str, window_scores: List[Tuple]) -> str:
     # Get unique words for green highlighting
     unique_words = get_unique_words(passage)
     
-    # Create a list to track character positions and their styling
-    char_styles = [''] * len(passage)
+    # Start with the original passage
+    result = passage
     
-    # Apply window highlighting first
-    for start, end, score, contributing_queries in window_scores:
+    # Apply window span highlighting with red dotted borders
+    # Sort by start position and apply from end to beginning to avoid position shifts
+    sorted_windows = sorted(window_scores, key=lambda x: x[0])
+    
+    for start, end, score, contributing_queries in reversed(sorted_windows):
         if score > 0.1:
-            # Mark characters in this window for highlighting
-            for i in range(start, min(end, len(passage))):
-                if i < len(char_styles):
-                    char_styles[i] = 'window-highlight'
-    
-    # Build the result with proper HTML structure
-    result_parts = []
-    i = 0
-    
-    while i < len(passage):
-        if char_styles[i] == 'window-highlight':
-            # Find the end of this highlighted section
-            j = i
-            while j < len(passage) and char_styles[j] == 'window-highlight':
-                j += 1
-            
-            # Get the window score for this section
-            window_score = 0.0
-            contributing_queries = []
-            for start, end, score, queries in window_scores:
-                if start <= i and j <= end and score > window_score:
-                    window_score = score
-                    contributing_queries = queries
+            window_text = result[start:end]
             
             # Format query breakdown
             breakdown_text = " | ".join([f"Q{q_idx+1}:{q_score:.2f}" for q_idx, _, q_score in contributing_queries[:2]])
-            annotation = f"<sup style='font-size:0.7em; color:#666;'>({window_score:.2f} | {breakdown_text})</sup>"
+            annotation = f"<sup style='font-size:0.7em; color:#666;'>({score:.2f} | {breakdown_text})</sup>"
             
-            # Apply highlighting to this section
-            section_text = passage[i:j]
-            highlighted_section = f"<span style='{color_for_score(window_score)}; display: inline-block;'>{section_text}{annotation}</span>"
-            result_parts.append(highlighted_section)
-            i = j
-        else:
-            # Regular text - apply unique word coloring
-            word_start = i
-            while i < len(passage) and char_styles[i] != 'window-highlight':
-                i += 1
-            
-            section_text = passage[word_start:i]
-            
-            # Apply unique word coloring to this section
-            def color_unique_words(match):
-                word = match.group(0)
-                word_lower = word.lower()
-                if word_lower in unique_words:
-                    return f"<span style='color: green; font-weight: bold;'>{word}</span>"
-                return word
-            
-            colored_section = re.sub(r'\b\w+\b', color_unique_words, section_text)
-            result_parts.append(colored_section)
+            # Use span with inline-block to avoid breaking text flow
+            window_html = f"<span style='{color_for_score(score)}; display: inline-block;'>{window_text}{annotation}</span>"
+            result = result[:start] + window_html + result[end:]
     
-    return ''.join(result_parts)
+    # Now apply unique word coloring - but be careful not to color inside HTML tags
+    def color_unique_words(match):
+        word = match.group(0)
+        word_lower = word.lower()
+        if word_lower in unique_words:
+            return f"<span style='color: green; font-weight: bold;'>{word}</span>"
+        return word
+    
+    # Apply unique word coloring only to text that's not inside HTML tags
+    # This regex matches word boundaries that are not inside HTML tags
+    result = re.sub(r'(?<!<[^>]*)\b\w+\b(?![^<]*>)', color_unique_words, result)
+    
+    return result
 
 # ---- UI ----
 st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
