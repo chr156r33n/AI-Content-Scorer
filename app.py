@@ -24,6 +24,7 @@ SENT_SPLIT  = re.compile(r"(?<=[.!?])\s+")
 WORD_RE     = re.compile(r"\b\w+\b", re.UNICODE)
 
 FILLER_WORDS = re.compile(r"\b(?:very|really|just|quite|simply|actually|basically|kind of|sort of|maybe|perhaps)\b", re.I)
+PASSIVE_HINT = re.compile(r"\b(?:is|are|was|were|be|been|being)\s+\w+ed\b", re.I)
 
 def tokenize(t: str) -> List[str]:
     return [x for x in TOKEN_SPLIT.split(t.lower()) if x]
@@ -221,12 +222,10 @@ def render_passage(
     if overstuff_threshold > 0 and queries:
         low_queries = sorted(queries, key=len, reverse=True)  # longer first to avoid nested hits
         counts = Counter()
-        # First pass: count occurrences (case-insensitive, word-boundary-ish)
         for q in low_queries:
             if not q.strip(): continue
             pattern = re.compile(rf"(?i)\b{re.escape(q)}\b")
             counts[q] = len(list(pattern.finditer(passage)))
-        # Second pass: mark occurrences beyond threshold
         for q in low_queries:
             if counts[q] > overstuff_threshold:
                 pattern = re.compile(rf"(?i)\b{re.escape(q)}\b")
@@ -243,7 +242,6 @@ def render_passage(
     q_top = None
     if show_per_query_stripes and len(queries):
         q_cmap = build_query_charmap(passage, wins, sims, len(queries))
-        # pick query with highest score at each char, if >0
         if q_cmap.size:
             q_top = np.argmax(q_cmap, axis=0)  # (L,)
             q_max = np.max(q_cmap, axis=0)
@@ -289,7 +287,6 @@ def render_passage(
             seg = passage[pos:b]
             seg_html = html.escape(seg)
 
-            # Apply per-query stripes as border-bottom color (single top-query stripe)
             if q_top is not None:
                 colored = []
                 i = 0
@@ -336,7 +333,6 @@ def render_passage(
     # Safety close
     for wid in list(active_win_ids)[::-1]:
         close_win(wid)
-    # close any leftover overlay spans
     while uniq_depth > 0: close_uniq(); uniq_depth -= 1
     while filler_depth > 0: close_filler(); filler_depth -= 1
     while over_depth > 0: close_over(); over_depth -= 1
@@ -345,7 +341,6 @@ def render_passage(
 
 # ----------------- Sentence chips & repetition meter -----------------
 def sentence_metrics(sent_text: str, queries: List[str], model_name: str) -> Dict[str, float]:
-    # Density proxy
     gr = gzip_ratio(sent_text)
     toks = tokenize(sent_text)
     semuniq, tok_count, ctok_count, uniq_count = semantic_uniques_score(sent_text)
@@ -353,15 +348,13 @@ def sentence_metrics(sent_text: str, queries: List[str], model_name: str) -> Dic
     gzip_norm = squash_01(gzip_adj)
     semu_norm = squash_01(semuniq)
 
-    # Overlap per sentence using the same embedder (sentence vs queries max)
     ov = 0.0
     if queries:
         vecs = embed_fastembed(queries + [sent_text], model_name=model_name)
         qv, sv = vecs[:-1], vecs[-1:]
         sims = (qv @ sv.T).flatten()
         if sims.size:
-            ov = float(np.mean(sims))  # avg over queries
-        # length-normalize lightly for very short sents
+            ov = float(np.mean(sims))
         length_factor = min(1.0, math.log1p(len(toks)) / math.log1p(20.0))
         ov = max(0.0, min(1.0, ov * length_factor))
 
@@ -371,13 +364,10 @@ def top_ngrams(text: str, n: int = 10) -> Dict[str, int]:
     toks = [t for t in tokenize(text) if len(t) >= 3]
     unis = Counter(toks)
     bigrams = Counter([" ".join(pair) for pair in zip(toks, toks[1:])])
-    # mix
     combined = unis.most_common(n) + bigrams.most_common(n)
-    # de-dupe keeping max count
     agg = {}
     for k, v in combined:
         agg[k] = max(v, agg.get(k, 0))
-    # sort by count desc
     return dict(sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:n])
 
 SYNONYM_HINTS = {
@@ -396,54 +386,141 @@ def synonym_nudges(terms: List[str]) -> Dict[str, List[str]]:
         if base in SYNONYM_HINTS:
             hints[t] = SYNONYM_HINTS[base]
         elif len(base) > 6:
-            # simple suffix-based nudge
             hints[t] = [base.rstrip("s"), base + "s"]
     return hints
+
+# ---------- ACTIONABLE EDIT PLAN HELPERS ----------
+def words_per_sentence(s: str) -> int:
+    return max(1, len([t for t in TOKEN_SPLIT.split(s) if t.strip()]))
+
+def find_low_coverage_gaps(passage: str, wins, sims: np.ndarray, queries: List[str], threshold: float = 0.15):
+    if sims.size == 0 or not queries:
+        return []
+    L = len(passage)
+    qmax = np.zeros(L, dtype=np.float32)
+    for wi, (s, e, _t) in enumerate(wins):
+        s, e = max(0, s), min(L, e)
+        if e <= s: continue
+        wmax = float(np.max(sims[:, wi])) if sims.size else 0.0
+        if wmax <= 0: continue
+        qmax[s:e] = np.maximum(qmax[s:e], wmax)
+    gaps, i = [], 0
+    while i < L:
+        if qmax[i] < threshold and not passage[i].isspace():
+            j = i + 1
+            while j < L and qmax[j] < threshold:
+                j += 1
+            for (ss, ee, txt) in split_sents(passage):
+                if ss <= i < ee:
+                    gaps.append((ss, ee))
+                    break
+            i = j
+        else:
+            i += 1
+    dedup, last = [], (-1, -1)
+    for g in gaps:
+        if g != last:
+            dedup.append(g); last = g
+    return dedup[:5]
+
+def query_priorities(queries: List[str], user_weights: Dict[int, float] | None):
+    weights = {i: 1.0 for i in range(len(queries))}
+    if user_weights:
+        weights.update(user_weights)
+    return weights
+
+def build_edit_plan(passage: str, queries: List[str], sims: np.ndarray, wins, window_scores, priorities: Dict[int, float], filler_count_limit: int = 2):
+    plan = {"additions": [], "trims": [], "rephrases": [], "structure": []}
+
+    gaps = find_low_coverage_gaps(passage, wins, sims, queries, threshold=0.15)
+    if sims.size and queries:
+        q_order = sorted(range(len(queries)), key=lambda i: -priorities.get(i, 1.0))
+        for (ss, ee) in gaps:
+            if not q_order: break
+            qi = q_order[0]
+            plan["additions"].append({
+                "where": (ss, ee),
+                "hint": f"After this sentence, add a concrete line addressing **Q{qi+1} – {queries[qi]}** (use a specific fact, benefit, or example)."
+            })
+
+    for qi, q in enumerate(queries):
+        if not q.strip(): continue
+        patt = re.compile(rf"(?i)\b{re.escape(q)}\b")
+        hits = list(patt.finditer(passage))
+        if len(hits) > filler_count_limit:
+            for m in hits[filler_count_limit:]:
+                plan["trims"].append({"where": (m.start(), m.end()), "hint": f"Replace exact **{q}** with an on-brand variant or pronoun (Q{qi+1})."})
+
+    for m in FILLER_WORDS.finditer(passage):
+        plan["trims"].append({"where": (m.start(), m.end()), "hint": "Remove hedge/filler for tighter prose."})
+    for (ss, ee, txt) in split_sents(passage):
+        if words_per_sentence(txt) > 26:
+            plan["rephrases"].append({"where": (ss, ee), "hint": "Split this long sentence (aim ≤ 22 words)."})
+        if PASSIVE_HINT.search(txt):
+            plan["rephrases"].append({"where": (ss, ee), "hint": "Prefer active voice: ‘We do X’ vs ‘X is done’. "})
+
+    low = [(i, ws) for i, ws in enumerate(window_scores) if ws[2] < 0.2]
+    high = [(i, ws) for i, ws in enumerate(window_scores) if ws[2] > 0.5]
+    if low:
+        i, (s, e, sc, _, _) = low[0]
+        plan["structure"].append({"where": (s, e), "hint": f"Section W{i+1} is thin (score {sc:.2f}). Add a specific claim, data point, or example tied to a priority query."})
+    if high:
+        i, (s, e, sc, contrib, _) = max(high, key=lambda t: t[1][2])
+        topq = ", ".join([f"Q{qi+1}" for (qi, _q, _qs) in contrib[:2]]) or "Q1"
+        plan["structure"].append({"where": (s, e), "hint": f"Strong section W{i+1} (score {sc:.2f}) linked to {topq}. Consider moving key lines from here earlier."})
+
+    return plan
+
+def render_edit_plan(plan, passage: str):
+    def show_item(tag, item):
+        s, e = item["where"]
+        excerpt = html.escape(passage[s:e][:140]).replace("\n", " ")
+        st.markdown(f"- **{tag}**: {item['hint']}  \n  <span style='color:#666'>…{excerpt}…</span>", unsafe_allow_html=True)
+
+    if plan["additions"]:
+        st.markdown("**Add**")
+        for it in plan["additions"]:
+            show_item("Add", it)
+    if plan["trims"]:
+        st.markdown("**Trim / Replace**")
+        for it in plan["trims"][:6]:
+            show_item("Trim", it)
+    if plan["rephrases"]:
+        st.markdown("**Rephrase**")
+        for it in plan["rephrases"][:6]:
+            show_item("Rewrite", it)
+    if plan["structure"]:
+        st.markdown("**Structure**")
+        for it in plan["structure"]:
+            show_item("Structure", it)
 
 # ----------------- UI -----------------
 st.set_page_config(page_title="Semantic Overlap & Density (Editor Mode)", layout="wide")
 st.title("Semantic Overlap & Density — Editor Mode (FastEmbed)")
 
-# Add comprehensive info section
-with st.expander("ℹ️ How to use this Editor Mode tool", expanded=False):
+# How-to accordion (compact, practical)
+with st.expander("📘 How to use", expanded=False):
     st.markdown("""
-    **This is an advanced content analysis and editing tool that helps you optimize your writing for search relevance and quality.**
-    
-    ### 🎯 **What it does:**
-    - **Analyzes semantic relevance** between your content and search queries using AI embeddings
-    - **Tracks improvements** by comparing current vs. previous runs
-    - **Highlights writing issues** like filler words and keyword stuffing
-    - **Provides editing tools** to clean up your text
-    
-    ### 🔧 **How to use it:**
-    1. **Enter your content** in the left text area
-    2. **Add search queries** in the right text area (one per line)
-    3. **Configure settings** in the sidebar (see tooltips for each option)
-    4. **Click 'Score Passage'** to analyze
-    5. **Review results** and make edits based on the feedback
-    6. **Run again** to see how your changes improved the scores
-    
-    ### 📊 **Understanding the results:**
-    - **Colored window borders**: Show sections with high query relevance
-    - **Per-query stripes**: Colored underlines show which query best matches each section
-    - **Green bold text**: Unique words that appear only once (good for diversity)
-    - **Dotted underlines**: Filler/hedging words you might want to replace
-    - **Dashed red underlines**: Over-stuffed keywords (appear too frequently)
-    - **Sentence chips**: Individual sentence scores with improvement deltas (Δ)
-    
-    ### 🎨 **Visual Legend:**
-    - **Window borders**: Relevance to your queries (thicker = more relevant)
-    - **Query stripes**: Which specific query matches each text section
-    - **Score badges**: Exact relevance scores and contributing queries
-    - **Delta values**: How much each sentence improved since last run
-    
-    ### 💡 **Pro Tips:**
-    - Start with **window size 3** and **stride 2** for balanced analysis
-    - Use **border threshold 0.3-0.5** to focus on moderately relevant sections
-    - Enable **sentence chips** to track improvements as you edit
-    - Use **editor helpers** to quickly clean up common issues
-    - **Lower over-stuffing threshold** (1-2) for SEO content, **higher** (3-5) for natural writing
-    """)
+**Goal:** Tweak your passage so it scores higher on *Relevance*, *Uniques*, and *Density*.
+
+**Steps**
+1. Paste your passage (left).
+2. Add 1–10 queries (right).
+3. Pick window size/stride in the sidebar.
+4. Click **Score Passage**.
+
+**Read the visuals**
+- **Colored boxes (W1, W2…):** strongest sections; badges show score + top queries.
+- **Green words:** unique content terms (appear once).
+- **Stripes:** which query dominates each span.
+- **Dotted/Dashed underlines:** filler / exact-match repeats.
+
+**Improve fast**
+- Cover gaps for priority queries.
+- Swap repeated words for on-brand synonyms.
+- Trim hedges; keep sentences tight.
+- Use the **Edit Plan** below for specific next steps.
+""")
 
 # ---------- Persistent sidebar toggles ----------
 def init_state(key, default):
@@ -453,76 +530,53 @@ def init_state(key, default):
 
 with st.sidebar:
     st.markdown("### 🤖 Configuration")
-    
     model_name = st.selectbox(
         "Embedding Model",
         ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"],
         index=init_state("model_idx", 0),
-        help="Choose the AI model for semantic analysis. BAAI/bge-small-en-v1.5 is faster and more accurate for English text. intfloat/e5-small-v2 is an alternative option."
+        help="BAAI/bge-small-en-v1.5 is fast & accurate for English; intfloat/e5-small-v2 is a solid alternative."
     )
     st.session_state["model_idx"] = ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"].index(model_name)
 
-    st.markdown("### 🪟 Windowing Settings")
-    
-    win_size = st.slider(
-        "Sentence Window Size", 
-        1, 6, init_state("win_size", 3),
-        help="Number of sentences grouped together for analysis. Larger windows (4-6) capture more context but may miss fine details. Smaller windows (1-2) are more precise but may miss broader themes."
-    )
+    st.markdown("### 🪟 Windowing")
+    win_size = st.slider("Sentence window size", 1, 6, init_state("win_size", 3))
     st.session_state["win_size"] = win_size
-    
-    stride = st.slider(
-        "Window Stride", 
-        1, 6, init_state("stride", 2),
-        help="How many sentences to skip between windows. Smaller stride (1) = more overlap and detailed coverage. Larger stride (4-6) = less overlap and broader coverage."
-    )
+    stride   = st.slider("Window stride", 1, 6, init_state("stride", 2))
     st.session_state["stride"] = stride
 
-    border_thresh = st.slider(
-        "Window Border Threshold", 
-        0.0, 1.0, init_state("border_thresh", float(MIN_WINDOW_BORDER_SCORE)), 0.05,
-        help="Only show colored borders for windows with relevance scores above this threshold. Score badges always show regardless. Lower values (0.0-0.3) show more windows, higher values (0.7-1.0) show only the most relevant sections."
-    )
+    border_thresh = st.slider("Window border threshold", 0.0, 1.0, init_state("border_thresh", float(MIN_WINDOW_BORDER_SCORE)), 0.05)
     st.session_state["border_thresh"] = border_thresh
     MIN_WINDOW_BORDER_SCORE = border_thresh
 
-    st.markdown("### 🎨 Visual Overlays")
-    
-    show_stripes = st.checkbox(
-        "Per-Query Coverage Stripes", 
-        value=init_state("show_stripes", True),
-        help="Show colored stripes under text indicating which query best matches each section. Each query gets a unique color. Helps identify which parts of your content align with specific search terms."
-    )
+    st.markdown("### 🎨 Overlays")
+    show_stripes = st.checkbox("Per-query coverage stripes", value=init_state("show_stripes", True))
     st.session_state["show_stripes"] = show_stripes
-    
-    show_sentence_chips = st.checkbox(
-        "Sentence Chips with Deltas", 
-        value=init_state("show_sentence_chips", True),
-        help="Display individual sentence analysis with comparison to previous runs. Shows overlap, uniqueness, and density scores for each sentence, plus how they changed since your last edit (Δ values)."
-    )
+    show_sentence_chips = st.checkbox("Sentence chips with deltas", value=init_state("show_sentence_chips", True))
     st.session_state["show_sentence_chips"] = show_sentence_chips
-    
-    show_filler = st.checkbox(
-        "Highlight Filler/Hedging Words", 
-        value=init_state("show_filler", True),
-        help="Highlight weak words like 'very', 'really', 'just', 'quite', 'actually', etc. These words often weaken your writing. Dotted underlines show where you might want to use stronger, more specific language."
-    )
+    show_filler = st.checkbox("Highlight filler/hedging", value=init_state("show_filler", True))
     st.session_state["show_filler"] = show_filler
-    
-    overstuff_limit = st.number_input(
-        "Over-Stuffing Threshold", 
-        0, 10, init_state("overstuff_limit", 2),
-        help="Flag when exact query terms appear more than this many times. Helps prevent keyword stuffing. Set to 0 to disable, or higher values (3-5) for more tolerance. Dashed red underlines show over-stuffed terms."
-    )
+    overstuff_limit = st.number_input("Over-stuffing threshold (exact repeats)", 0, 10, init_state("overstuff_limit", 2))
     st.session_state["overstuff_limit"] = overstuff_limit
 
-    st.markdown("### ✂️ Editor Helpers")
-    
-    if st.button("Trim Filler Words", help="Remove common filler words (very, really, just, etc.) from your text to make it more concise and impactful."):
-        st.session_state["apply_trim_filler"] = True
-    
-    if st.button("Collapse Repeated Spaces", help="Clean up multiple consecutive spaces and normalize whitespace in your text."):
-        st.session_state["apply_collapse_spaces"] = True
+    st.markdown("### 🎯 Goals & priorities")
+    goal = st.radio("Optimize for", ["Balance (default)", "Overlap first"], index=init_state("goal_idx", 0))
+    st.session_state["goal_idx"] = 0 if goal == "Balance (default)" else 1
+
+    # Query priorities based on the current (or last typed) query list in session
+    st.markdown("Query weights")
+    weights = {}
+    q_text_for_weights = st.session_state.get("queries_text", "")
+    _q_lines = [q.strip() for q in q_text_for_weights.splitlines() if q.strip()][:MAX_QUERIES]
+    if "query_weights" not in st.session_state:
+        st.session_state["query_weights"] = {}
+    for i, q in enumerate(_q_lines):
+        w = st.number_input(f"Q{i+1}", 0.1, 3.0, float(st.session_state["query_weights"].get(i, 1.0)), 0.1, key=f"qw_{i}")
+        weights[i] = w
+    st.session_state["query_weights"] = weights
+
+    st.markdown("### ✂️ Editor helpers")
+    if st.button("Trim filler words"): st.session_state["apply_trim_filler"] = True
+    if st.button("Collapse repeated spaces"): st.session_state["apply_collapse_spaces"] = True
 
 # Inputs
 colA, colB = st.columns([1,1])
@@ -544,7 +598,7 @@ if st.session_state.get("apply_collapse_spaces"):
     passage = re.sub(r"\s{2,}", " ", passage)
     st.session_state["apply_collapse_spaces"] = False
 
-# Save back to state so the text persists after rerun
+# Persist current text/queries
 st.session_state["passage_text"] = passage
 st.session_state["queries_text"] = raw_queries
 
@@ -568,7 +622,7 @@ if st.button("Score Passage"):
     # --- Metrics ---
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Gzip (density, norm)", f"{gzip_norm:.2f}")
-    m2.metric("Semantic Uniques (norm)", f"{semu_norm:.2f}")
+    m2.metric("Semantic Uniques (norm)", f"{semun_norm:.2f}")
     m3.metric("Overlap (relevance)",    f"{ov_len:.2f}")
     m4.metric("Content Balance Score",  f"{final:.2f}")
 
@@ -616,7 +670,6 @@ if st.button("Score Passage"):
         for (s, e, txt) in sents:
             m = sentence_metrics(txt, queries, model_name=model_name)
             chips.append((txt, m))
-        # compute deltas vs last run (by hashing sentence text)
         prev = st.session_state.get("prev_sentence_scores", {})
         curr = {}
         for txt, m in chips:
@@ -649,7 +702,6 @@ if st.button("Score Passage"):
         with cols[0]:
             st.write({k: reps[k] for k in list(reps.keys())[:10]})
         with cols[1]:
-            # suggest synonyms for top repeated unigrams only
             unigram_terms = [k for k in reps.keys() if " " not in k][:5]
             hints = synonym_nudges(unigram_terms)
             if hints:
@@ -659,6 +711,32 @@ if st.button("Score Passage"):
                 st.write("No synonym nudges found for top terms.")
     else:
         st.write("No repeated terms found.")
+
+    # --- Edit plan (actionable) ---
+    st.markdown("### Edit Plan")
+    gap_bias = 0.12 if st.session_state.get("goal_idx", 0) == 1 else 0.15  # (kept for future tuning)
+    stuff_limit = int(st.session_state.get("overstuff_limit", 2))
+    prio = query_priorities(queries, st.session_state.get("query_weights", {}))
+    plan = build_edit_plan(
+        passage=passage,
+        queries=queries,
+        sims=sims,
+        wins=wins,
+        window_scores=win_scores,
+        priorities=prio,
+        filler_count_limit=stuff_limit
+    )
+
+    with st.expander("🧭 How to use these results", expanded=False):
+        st.markdown("""
+- **Add** content where *coverage gaps* appear for your priority queries.
+- **Trim** exact repeats and **filler** to raise uniques and keep density healthy.
+- **Rephrase** long or passive sentences for clarity and variety.
+- **Restructure**: surface the strongest section earlier; strengthen thin sections with specifics.
+""")
+
+    with st.expander("✅ Suggested next edits (top picks)", expanded=True):
+        render_edit_plan(plan, passage)
 
     # --- Window Summary ---
     st.markdown("### Window Summary")
