@@ -182,7 +182,8 @@ def render_passage(
     queries: List[str],
     show_per_query_stripes: bool,
     show_filler_flags: bool,
-    overstuff_threshold: int
+    overstuff_threshold: int,
+    show_windows: bool = True
 ) -> str:
     """ID-aware renderer with optional per-query stripes and filler/over-stuffing overlays."""
     if not passage: return ""
@@ -198,10 +199,15 @@ def render_passage(
         start = max(0, min(len(passage), int(start)))
         end   = max(0, min(len(passage), int(end)))
         if end <= start: continue
-        style = color_for_window(wid, float(score)) if render_flag else "padding:0;"
-        win_meta[wid] = {"score": float(score), "contrib": contrib, "render": bool(render_flag), "style": style}
-        opens[start].append({"type":"win", "id": wid})
-        closes[end].append({"type":"win", "id": wid})
+        # Only render windows if show_windows is True
+        if show_windows:
+            style = color_for_window(wid, float(score)) if render_flag else "padding:0;"
+            win_meta[wid] = {"score": float(score), "contrib": contrib, "render": bool(render_flag), "style": style}
+            opens[start].append({"type":"win", "id": wid})
+            closes[end].append({"type":"win", "id": wid})
+        else:
+            # Still store metadata for badges but don't render borders
+            win_meta[wid] = {"score": float(score), "contrib": contrib, "render": False, "style": "padding:0;"}
 
     # Unique word events
     for (s, e) in uniq_spans:
@@ -549,9 +555,30 @@ with st.sidebar:
     st.session_state["border_thresh"] = border_thresh
     MIN_WINDOW_BORDER_SCORE = border_thresh
 
-    st.markdown("### 🎨 Overlays")
-    show_stripes = st.checkbox("Per-query coverage stripes", value=init_state("show_stripes", True))
+    st.markdown("### 🎨 Visualization Mode")
+    viz_mode = st.radio(
+        "Choose visualization focus",
+        ["Windows Only", "Coverage Stripes Only", "Both (cluttered)"],
+        index=init_state("viz_mode_idx", 0),
+        help="Windows show relevance scores, Stripes show query coverage. Both together can be hard to read."
+    )
+    st.session_state["viz_mode_idx"] = ["Windows Only", "Coverage Stripes Only", "Both (cluttered)"].index(viz_mode)
+    
+    # Set visualization flags based on mode
+    if viz_mode == "Windows Only":
+        show_stripes = False
+        show_windows = True
+    elif viz_mode == "Coverage Stripes Only":
+        show_stripes = True
+        show_windows = False
+    else:  # Both
+        show_stripes = True
+        show_windows = True
+    
     st.session_state["show_stripes"] = show_stripes
+    st.session_state["show_windows"] = show_windows
+
+    st.markdown("### 🎨 Additional Overlays")
     show_sentence_chips = st.checkbox("Sentence chips with deltas", value=init_state("show_sentence_chips", True))
     st.session_state["show_sentence_chips"] = show_sentence_chips
     show_filler = st.checkbox("Highlight filler/hedging", value=init_state("show_filler", True))
@@ -642,7 +669,8 @@ if st.button("Score Passage"):
         queries=queries,
         show_per_query_stripes=show_stripes,
         show_filler_flags=show_filler,
-        overstuff_threshold=int(overstuff_limit)
+        overstuff_threshold=int(overstuff_limit),
+        show_windows=st.session_state.get("show_windows", True)
     )
     st.markdown("<div style='line-height:1.8; font-size:1.05rem;'>"+html_block+"</div>", unsafe_allow_html=True)
 
