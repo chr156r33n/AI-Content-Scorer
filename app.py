@@ -404,6 +404,47 @@ def synonym_nudges(terms: List[str]) -> Dict[str, List[str]]:
 st.set_page_config(page_title="Semantic Overlap & Density (Editor Mode)", layout="wide")
 st.title("Semantic Overlap & Density — Editor Mode (FastEmbed)")
 
+# Add comprehensive info section
+with st.expander("ℹ️ How to use this Editor Mode tool", expanded=False):
+    st.markdown("""
+    **This is an advanced content analysis and editing tool that helps you optimize your writing for search relevance and quality.**
+    
+    ### 🎯 **What it does:**
+    - **Analyzes semantic relevance** between your content and search queries using AI embeddings
+    - **Tracks improvements** by comparing current vs. previous runs
+    - **Highlights writing issues** like filler words and keyword stuffing
+    - **Provides editing tools** to clean up your text
+    
+    ### 🔧 **How to use it:**
+    1. **Enter your content** in the left text area
+    2. **Add search queries** in the right text area (one per line)
+    3. **Configure settings** in the sidebar (see tooltips for each option)
+    4. **Click 'Score Passage'** to analyze
+    5. **Review results** and make edits based on the feedback
+    6. **Run again** to see how your changes improved the scores
+    
+    ### 📊 **Understanding the results:**
+    - **Colored window borders**: Show sections with high query relevance
+    - **Per-query stripes**: Colored underlines show which query best matches each section
+    - **Green bold text**: Unique words that appear only once (good for diversity)
+    - **Dotted underlines**: Filler/hedging words you might want to replace
+    - **Dashed red underlines**: Over-stuffed keywords (appear too frequently)
+    - **Sentence chips**: Individual sentence scores with improvement deltas (Δ)
+    
+    ### 🎨 **Visual Legend:**
+    - **Window borders**: Relevance to your queries (thicker = more relevant)
+    - **Query stripes**: Which specific query matches each text section
+    - **Score badges**: Exact relevance scores and contributing queries
+    - **Delta values**: How much each sentence improved since last run
+    
+    ### 💡 **Pro Tips:**
+    - Start with **window size 3** and **stride 2** for balanced analysis
+    - Use **border threshold 0.3-0.5** to focus on moderately relevant sections
+    - Enable **sentence chips** to track improvements as you edit
+    - Use **editor helpers** to quickly clean up common issues
+    - **Lower over-stuffing threshold** (1-2) for SEO content, **higher** (3-5) for natural writing
+    """)
+
 # ---------- Persistent sidebar toggles ----------
 def init_state(key, default):
     if key not in st.session_state:
@@ -411,38 +452,76 @@ def init_state(key, default):
     return st.session_state[key]
 
 with st.sidebar:
-    st.markdown("### Configuration")
+    st.markdown("### 🤖 Configuration")
+    
     model_name = st.selectbox(
-        "Embedding model",
+        "Embedding Model",
         ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"],
-        index=init_state("model_idx", 0)
+        index=init_state("model_idx", 0),
+        help="Choose the AI model for semantic analysis. BAAI/bge-small-en-v1.5 is faster and more accurate for English text. intfloat/e5-small-v2 is an alternative option."
     )
     st.session_state["model_idx"] = ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"].index(model_name)
 
-    st.markdown("### Windowing")
-    win_size = st.slider("Sentence window size", 1, 6, init_state("win_size", 3))
+    st.markdown("### 🪟 Windowing Settings")
+    
+    win_size = st.slider(
+        "Sentence Window Size", 
+        1, 6, init_state("win_size", 3),
+        help="Number of sentences grouped together for analysis. Larger windows (4-6) capture more context but may miss fine details. Smaller windows (1-2) are more precise but may miss broader themes."
+    )
     st.session_state["win_size"] = win_size
-    stride   = st.slider("Window stride", 1, 6, init_state("stride", 2))
+    
+    stride = st.slider(
+        "Window Stride", 
+        1, 6, init_state("stride", 2),
+        help="How many sentences to skip between windows. Smaller stride (1) = more overlap and detailed coverage. Larger stride (4-6) = less overlap and broader coverage."
+    )
     st.session_state["stride"] = stride
 
-    border_thresh = st.slider("Window border threshold", 0.0, 1.0, init_state("border_thresh", float(MIN_WINDOW_BORDER_SCORE)), 0.05)
+    border_thresh = st.slider(
+        "Window Border Threshold", 
+        0.0, 1.0, init_state("border_thresh", float(MIN_WINDOW_BORDER_SCORE)), 0.05,
+        help="Only show colored borders for windows with relevance scores above this threshold. Score badges always show regardless. Lower values (0.0-0.3) show more windows, higher values (0.7-1.0) show only the most relevant sections."
+    )
     st.session_state["border_thresh"] = border_thresh
     MIN_WINDOW_BORDER_SCORE = border_thresh
 
-    st.markdown("### Overlays (toggle)")
-    show_stripes = st.checkbox("Per-query coverage stripes", value=init_state("show_stripes", True))
+    st.markdown("### 🎨 Visual Overlays")
+    
+    show_stripes = st.checkbox(
+        "Per-Query Coverage Stripes", 
+        value=init_state("show_stripes", True),
+        help="Show colored stripes under text indicating which query best matches each section. Each query gets a unique color. Helps identify which parts of your content align with specific search terms."
+    )
     st.session_state["show_stripes"] = show_stripes
-    show_sentence_chips = st.checkbox("Sentence chips with deltas", value=init_state("show_sentence_chips", True))
+    
+    show_sentence_chips = st.checkbox(
+        "Sentence Chips with Deltas", 
+        value=init_state("show_sentence_chips", True),
+        help="Display individual sentence analysis with comparison to previous runs. Shows overlap, uniqueness, and density scores for each sentence, plus how they changed since your last edit (Δ values)."
+    )
     st.session_state["show_sentence_chips"] = show_sentence_chips
-    show_filler = st.checkbox("Highlight filler / hedging", value=init_state("show_filler", True))
+    
+    show_filler = st.checkbox(
+        "Highlight Filler/Hedging Words", 
+        value=init_state("show_filler", True),
+        help="Highlight weak words like 'very', 'really', 'just', 'quite', 'actually', etc. These words often weaken your writing. Dotted underlines show where you might want to use stronger, more specific language."
+    )
     st.session_state["show_filler"] = show_filler
-    overstuff_limit = st.number_input("Over-stuffing threshold (exact query repeats)", 0, 10, init_state("overstuff_limit", 2))
+    
+    overstuff_limit = st.number_input(
+        "Over-Stuffing Threshold", 
+        0, 10, init_state("overstuff_limit", 2),
+        help="Flag when exact query terms appear more than this many times. Helps prevent keyword stuffing. Set to 0 to disable, or higher values (3-5) for more tolerance. Dashed red underlines show over-stuffed terms."
+    )
     st.session_state["overstuff_limit"] = overstuff_limit
 
-    st.markdown("### Editor helpers")
-    if st.button("Trim filler words"):
+    st.markdown("### ✂️ Editor Helpers")
+    
+    if st.button("Trim Filler Words", help="Remove common filler words (very, really, just, etc.) from your text to make it more concise and impactful."):
         st.session_state["apply_trim_filler"] = True
-    if st.button("Collapse repeated spaces"):
+    
+    if st.button("Collapse Repeated Spaces", help="Clean up multiple consecutive spaces and normalize whitespace in your text."):
         st.session_state["apply_collapse_spaces"] = True
 
 # Inputs
