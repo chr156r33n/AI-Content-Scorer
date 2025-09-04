@@ -465,12 +465,6 @@ def render_diff(old: str, new: str):
 st.set_page_config(page_title="Semantic Overlap & Density (Editor Mode)", layout="wide")
 st.title("Semantic Overlap & Density — Editor Mode (FastEmbed)")
 
-with st.expander("How to use", expanded=False):
-    st.markdown("""
-**Run analysis** to get metrics and visual highlights.  
-**GPT-3.5 rewrite** is available when you provide an API key in the sidebar.
-""")
-
 def init_state(key, default):
     if key not in st.session_state:
         st.session_state[key] = default
@@ -497,7 +491,7 @@ with st.sidebar:
     show_filler = st.checkbox("Highlight filler/hedging", value=init_state("show_filler", True))
     st.session_state["show_filler"] = show_filler
 
-    st.markdown("### Optional: GPT-3.5 Rewrite")
+    st.markdown("### Optional: OpenAI GPT Rewrite")
     openai_key = st.text_input("OpenAI API Key", type="password", value=init_state("openai_key", ""))
     st.session_state["openai_key"] = openai_key
     gpt_temp = st.slider("Creativity (temperature)", 0.0, 1.0, init_state("gpt_temp", 0.2), 0.05)
@@ -505,7 +499,7 @@ with st.sidebar:
     brand_notes = st.text_area("Brand guardrails (tone, style, banned words, etc.)",
                                value=init_state("brand_notes", ""))
     st.session_state["brand_notes"] = brand_notes
-    gpt_model = st.text_input("GPT-3.5 model", value=init_state("gpt_model", GPT35_DEFAULT),
+    gpt_model = st.text_input("OpenAI GPT model", value=init_state("gpt_model", GPT35_DEFAULT),
                               help="Defaults to gpt-3.5-turbo-0125. Change if needed.")
     st.session_state["gpt_model"] = gpt_model
 
@@ -546,7 +540,6 @@ if st.button("Score Passage"):
         )
         final = geometric_mean([gzip_norm, semu_norm, ov_len])
 
-        # Store analysis results in session state for GPT-3.5 rewrite
         st.session_state["gzip_norm"] = gzip_norm
         st.session_state["semu_norm"] = semu_norm
         st.session_state["ov_len"] = ov_len
@@ -596,12 +589,12 @@ if st.button("Score Passage"):
     st.markdown(", ".join([f"**Q{i+1}**: <span style='color:{QUERY_PALETTE[i%len(QUERY_PALETTE)]}'>{html.escape(q)}</span>"
                            for i, q in enumerate(queries)]) , unsafe_allow_html=True)
 
-    # ---------------- GPT-3.5 Rewrite (always available if API key present) ----------------
+    # ---------------- OpenAI GPT Rewrite (always available if API key present) ----------------
     if st.session_state.get("openai_key", "").strip():
-        st.markdown("## GPT-3.5 Rewrite")
+        st.markdown("## OpenAI GPT Rewrite")
         st.caption("Generate an improved version of your passage. We send the passage, queries, and high-level scores—no analytics beyond that.")
         
-        with st.spinner("Calling GPT-3.5…"):
+        with st.spinner("Calling OpenAI…"):
             prompt = build_llm_prompt(
                 passage=passage,
                 queries=queries,
@@ -658,7 +651,7 @@ if st.button("Score Passage"):
                 st.metric("Content Balance", f"{final:.2f}")
             
             with col2:
-                st.markdown("**GPT-3.5 Rewrite**")
+                st.markdown("**OpenAI GPT Rewrite**")
                 gzip_delta = rewrite_scores['gzip_norm'] - gzip_norm
                 semu_delta = rewrite_scores['semu_norm'] - semu_norm
                 ov_delta = rewrite_scores['ov_len'] - ov_len
@@ -686,4 +679,4 @@ if st.button("Score Passage"):
             st.markdown("### Diff vs Original")
             render_diff(passage, rewrite)
     else:
-        st.info("Paste an OpenAI API key in the sidebar to enable the GPT-3.5 rewrite feature.")
+        st.info("Paste an OpenAI API key in the sidebar to enable the OpenAI GPT rewrite feature.")
