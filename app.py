@@ -137,7 +137,7 @@ def render_highlighted(passage: str, window_scores):
         import re
         seg_words = re.findall(r"\b\w+\b", seg_lower)
         # Only highlight if the segment is exactly a single unique word
-        is_unique = len(seg_words) == 1 and seg_words[0] in unique_words
+        is_unique = any(word in unique_words for word in seg_words)
         
         if b > 0.1:  # High overlap score
             annotation = f"<sup style='font-size:0.7em; color:#666;'>({b:.2f})</sup>"
