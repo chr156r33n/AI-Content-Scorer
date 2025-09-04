@@ -489,7 +489,7 @@ if st.button("Score Passage"):
     # --- Metrics ---
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Gzip (density, norm)", f"{gzip_norm:.2f}")
-    m2.metric("Semantic Uniques (norm)", f"{semun_norm:.2f}")
+    m2.metric("Semantic Uniques (norm)", f"{semu_norm:.2f}")
     m3.metric("Overlap (relevance)",    f"{ov_len:.2f}")
     m4.metric("Content Balance Score",  f"{final:.2f}")
 
