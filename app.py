@@ -136,7 +136,8 @@ def render_highlighted(passage: str, window_scores):
         # Extract actual words from segment for precise matching
         import re
         seg_words = re.findall(r"\b\w+\b", seg_lower)
-        is_unique = any(word in unique_words for word in seg_words)
+        # Only highlight if the segment is exactly a single unique word
+        is_unique = len(seg_words) == 1 and seg_words[0] in unique_words
         
         if b > 0.1:  # High overlap score
             annotation = f"<sup style='font-size:0.7em; color:#666;'>({b:.2f})</sup>"
@@ -211,13 +212,6 @@ if st.button("Score Passage"):
     st.markdown("<div style='line-height:1.8; font-size:1.05rem;'>"+render_highlighted(passage, win_scores)+"</div>",
                 unsafe_allow_html=True)
 
-    st.subheader("Query × Window Heatmap")
-    if sims.size:
-        import pandas as pd
-        df = pd.DataFrame(sims, index=q_labels, columns=w_labels)
-        st.dataframe(df.style.background_gradient(axis=None), use_container_width=True)
-    else:
-        st.info("No similarity matrix (empty inputs).")
 
     with st.expander("Details"):
         st.write(f"Raw gzip ratio: {gr:.4f}")
