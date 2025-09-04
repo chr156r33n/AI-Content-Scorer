@@ -337,162 +337,6 @@ def render_passage(
     while over_depth > 0: close_over(); over_depth -= 1
 
     return "".join(out)
-
-# ----------------- Sentence chips & repetition meter -----------------
-def sentence_metrics(sent_text: str, queries: List[str], model_name: str) -> Dict[str, float]:
-    gr = gzip_ratio(sent_text)
-    toks = tokenize(sent_text)
-    semuniq, tok_count, ctok_count, uniq_count = semantic_uniques_score(sent_text)
-    gzip_adj = gr / max(1e-9, math.log1p(tok_count))
-    gzip_norm = squash_01(gzip_adj)
-    semu_norm = squash_01(semuniq)
-
-    ov = 0.0
-    if queries:
-        vecs = embed_fastembed(queries + [sent_text], model_name=model_name)
-        qv, sv = vecs[:-1], vecs[-1:]
-        sims = (qv @ sv.T).flatten()
-        if sims.size:
-            ov = float(np.mean(sims))
-        length_factor = min(1.0, math.log1p(len(toks)) / math.log1p(20.0))
-        ov = max(0.0, min(1.0, ov * length_factor))
-
-    return {"density": gzip_norm, "uniques": semu_norm, "overlap": ov}
-
-def top_ngrams(text: str, n: int = 10) -> Dict[str, int]:
-    toks = [t for t in tokenize(text) if len(t) >= 3]
-    unis = Counter(toks)
-    bigrams = Counter([" ".join(pair) for pair in zip(toks, toks[1:])])
-    combined = unis.most_common(n) + bigrams.most_common(n)
-    agg = {}
-    for k, v in combined:
-        agg[k] = max(v, agg.get(k, 0))
-    return dict(sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:n])
-
-SYNONYM_HINTS = {
-    "very": ["extremely", "highly", "especially"],
-    "really": ["truly", "genuinely"],
-    "just": ["simply", "only"],
-    "luxury": ["high-end", "upscale", "premium"],
-    "spa": ["wellness", "therapies", "treatments"],
-    "hotel": ["property", "retreat", "stay"],
-}
-
-def synonym_nudges(terms: List[str]) -> Dict[str, List[str]]:
-    hints = {}
-    for t in terms:
-        base = t.lower()
-        if base in SYNONYM_HINTS:
-            hints[t] = SYNONYM_HINTS[base]
-        elif len(base) > 6:
-            hints[t] = [base.rstrip("s"), base + "s"]
-    return hints
-
-# ---------- ACTIONABLE EDIT PLAN HELPERS ----------
-def words_per_sentence(s: str) -> int:
-    return max(1, len([t for t in TOKEN_SPLIT.split(s) if t.strip()]))
-
-def find_low_coverage_gaps(passage: str, wins, sims: np.ndarray, queries: List[str], threshold: float = 0.15):
-    if sims.size == 0 or not queries:
-        return []
-    L = len(passage)
-    qmax = np.zeros(L, dtype=np.float32)
-    for wi, (s, e, _t) in enumerate(wins):
-        s, e = max(0, s), min(L, e)
-        if e <= s: continue
-        wmax = float(np.max(sims[:, wi])) if sims.size else 0.0
-        if wmax <= 0: continue
-        qmax[s:e] = np.maximum(qmax[s:e], wmax)
-    gaps, i = [], 0
-    while i < L:
-        if qmax[i] < threshold and not passage[i].isspace():
-            j = i + 1
-            while j < L and qmax[j] < threshold:
-                j += 1
-            for (ss, ee, txt) in split_sents(passage):
-                if ss <= i < ee:
-                    gaps.append((ss, ee))
-                    break
-            i = j
-        else:
-            i += 1
-    dedup, last = [], (-1, -1)
-    for g in gaps:
-        if g != last:
-            dedup.append(g); last = g
-    return dedup[:5]
-
-def query_priorities(queries: List[str], user_weights: Dict[int, float] | None):
-    weights = {i: 1.0 for i in range(len(queries))}
-    if user_weights:
-        weights.update(user_weights)
-    return weights
-
-def build_edit_plan(passage: str, queries: List[str], sims: np.ndarray, wins, window_scores, priorities: Dict[int, float], filler_count_limit: int = 2):
-    plan = {"additions": [], "trims": [], "rephrases": [], "structure": []}
-
-    gaps = find_low_coverage_gaps(passage, wins, sims, queries, threshold=0.15)
-    if sims.size and queries:
-        q_order = sorted(range(len(queries)), key=lambda i: -priorities.get(i, 1.0))
-        for (ss, ee) in gaps:
-            if not q_order: break
-            qi = q_order[0]
-            plan["additions"].append({
-                "where": (ss, ee),
-                "hint": f"After this sentence, add a concrete line addressing **Q{qi+1} – {queries[qi]}** (use a specific fact, benefit, or example)."
-            })
-
-    for qi, q in enumerate(queries):
-        if not q.strip(): continue
-        patt = re.compile(rf"(?i)\b{re.escape(q)}\b")
-        hits = list(patt.finditer(passage))
-        if len(hits) > filler_count_limit:
-            for m in hits[filler_count_limit:]:
-                plan["trims"].append({"where": (m.start(), m.end()), "hint": f"Replace exact **{q}** with an on-brand variant or pronoun (Q{qi+1})."})
-
-    for m in FILLER_WORDS.finditer(passage):
-        plan["trims"].append({"where": (m.start(), m.end()), "hint": "Remove hedge/filler for tighter prose."})
-    for (ss, ee, txt) in split_sents(passage):
-        if words_per_sentence(txt) > 26:
-            plan["rephrases"].append({"where": (ss, ee), "hint": "Split this long sentence (aim ≤ 22 words)."})
-        if PASSIVE_HINT.search(txt):
-            plan["rephrases"].append({"where": (ss, ee), "hint": "Prefer active voice: ‘We do X’ vs ‘X is done’. "})
-
-    low = [(i, ws) for i, ws in enumerate(window_scores) if ws[2] < 0.2]
-    high = [(i, ws) for i, ws in enumerate(window_scores) if ws[2] > 0.5]
-    if low:
-        i, (s, e, sc, _, _) = low[0]
-        plan["structure"].append({"where": (s, e), "hint": f"Section W{i+1} is thin (score {sc:.2f}). Add a specific claim, data point, or example tied to a priority query."})
-    if high:
-        i, (s, e, sc, contrib, _) = max(high, key=lambda t: t[1][2])
-        topq = ", ".join([f"Q{qi+1}" for (qi, _q, _qs) in contrib[:2]]) or "Q1"
-        plan["structure"].append({"where": (s, e), "hint": f"Strong section W{i+1} (score {sc:.2f}) linked to {topq}. Consider moving key lines from here earlier."})
-
-    return plan
-
-def render_edit_plan(plan, passage: str):
-    def show_item(tag, item):
-        s, e = item["where"]
-        excerpt = html.escape(passage[s:e][:140]).replace("\n", " ")
-        st.markdown(f"- **{tag}**: {item['hint']}  \n  <span style='color:#666'>…{excerpt}…</span>", unsafe_allow_html=True)
-
-    if plan["additions"]:
-        st.markdown("**Add**")
-        for it in plan["additions"]:
-            show_item("Add", it)
-    if plan["trims"]:
-        st.markdown("**Trim / Replace**")
-        for it in plan["trims"][:6]:
-            show_item("Trim", it)
-    if plan["rephrases"]:
-        st.markdown("**Rephrase**")
-        for it in plan["rephrases"][:6]:
-            show_item("Rewrite", it)
-    if plan["structure"]:
-        st.markdown("**Structure**")
-        for it in plan["structure"]:
-            show_item("Structure", it)
-
 # ----------------- OpenAI GPT-3.5 integration (optional) -----------------
 def build_llm_prompt(
     passage: str,
@@ -619,8 +463,6 @@ with st.sidebar:
     MIN_WINDOW_BORDER_SCORE = border_thresh
 
     st.markdown("### 🎨 Overlays")
-    show_sentence_chips = st.checkbox("Sentence chips with deltas", value=init_state("show_sentence_chips", True))
-    st.session_state["show_sentence_chips"] = show_sentence_chips
     show_filler = st.checkbox("Highlight filler/hedging", value=init_state("show_filler", True))
     st.session_state["show_filler"] = show_filler
 
@@ -668,6 +510,12 @@ if st.button("Score Passage"):
             passage, queries, model_name=model_name, win_size=win_size, stride=stride
         )
         final = geometric_mean([gzip_norm, semu_norm, ov_len])
+        
+        # Store analysis results in session state for GPT-3.5 rewrite
+        st.session_state["gzip_norm"] = gzip_norm
+        st.session_state["semu_norm"] = semu_norm
+        st.session_state["ov_len"] = ov_len
+        st.session_state["win_scores"] = win_scores
 
     # --- Metrics ---
     m1, m2, m3, m4 = st.columns(4)
@@ -713,87 +561,16 @@ if st.button("Score Passage"):
     st.markdown(", ".join([f"**Q{i+1}**: <span style='color:{QUERY_PALETTE[i%len(QUERY_PALETTE)]}'>{html.escape(q)}</span>"
                            for i, q in enumerate(queries)]) , unsafe_allow_html=True)
 
-    # --- Sentence chips with deltas ---
-    if st.session_state.get("show_sentence_chips", True):
-        st.markdown("### Sentence Chips (Δ vs previous run)")
-        sents = split_sents(passage)
-        chips = []
-        for (s, e, txt) in sents:
-            m = sentence_metrics(txt, queries, model_name=model_name)
-            chips.append((txt, m))
-        prev = st.session_state.get("prev_sentence_scores", {})
-        if not isinstance(prev, dict):
-            prev = {}
-            st.session_state["prev_sentence_scores"] = prev
-        curr = {}
-        for txt, m in chips:
-            key = hashlib.md5(txt.encode("utf-8")).hexdigest()
-            curr[key] = m
-            d = prev.get(key, None)
-            def fmt(val): return f"{val:.2f}"
-            def delta(curr, prev): 
-                return f"{(curr - prev):+0.02f}" if prev is not None else "—"
-            density = fmt(m["density"]); d_d = delta(m["density"], d["density"]) if d else "—"
-            uniq    = fmt(m["uniques"]); d_u = delta(m["uniques"], d["uniques"]) if d else "—"
-            ov      = fmt(m["overlap"]); d_o = delta(m["overlap"], d["overlap"]) if d else "—"
-            st.markdown(
-                f"<div style='margin:4px 0; padding:6px 8px; border:1px solid #eee; border-radius:6px;'>"
-                f"<div style='font-size:0.95rem; margin-bottom:4px'>{html.escape(txt)}</div>"
-                f"<div style='font-size:0.85rem; color:#444'>"
-                f"Overlap <b>{ov}</b> (<span style='color:#666'>{d_o}</span>) • "
-                f"Uniques <b>{uniq}</b> (<span style='color:#666'>{d_u}</span>) • "
-                f"Density <b>{density}</b> (<span style='color:#666'>{d_d}</span>)"
-                f"</div></div>",
-                unsafe_allow_html=True
-            )
-        st.session_state["prev_sentence_scores"] = curr
-
-    # --- Repetition meter + synonym nudges ---
-    st.markdown("### Repetition Meter & Synonym Nudges")
-    reps = top_ngrams(passage, n=10)
-    if reps:
-        cols = st.columns(2)
-        with cols[0]:
-            st.write({k: reps[k] for k in list(reps.keys())[:10]})
-        with cols[1]:
-            unigram_terms = [k for k in reps.keys() if " " not in k][:5]
-            hints = synonym_nudges(unigram_terms)
-            if hints:
-                for term, alt in hints.items():
-                    st.write(f"**{term}** → " + ", ".join(alt))
-            else:
-                st.write("No synonym nudges found for top terms.")
-    else:
-        st.write("No repeated terms found.")
-
-    # --- Edit plan (actionable) ---
-    st.markdown("### Edit Plan")
-    prio = query_priorities(queries, st.session_state.get("query_weights", {}))
-    plan = build_edit_plan(
-        passage=passage,
-        queries=queries,
-        sims=sims,
-        wins=wins,
-        window_scores=win_scores,
-        priorities=prio,
-        filler_count_limit=2
-    )
-    with st.expander("✅ Suggested next edits", expanded=True):
-        render_edit_plan(plan, passage)
-
-    # ---------------- GPT-3.5 Rewrite (only if API key present) ----------------
-    if st.session_state.get("openai_key", "").strip():
-        st.markdown("## ✨ GPT-3.5 Rewrite (optional)")
-        st.caption("Runs only when you click the button. We send the passage, queries, and high-level scores—no analytics beyond that.")
+    if "gzip_norm" in st.session_state and "semu_norm" in st.session_state and "ov_len" in st.session_state:
         if st.button("Generate GPT-3.5 Rewrite"):
             with st.spinner("Calling GPT-3.5…"):
                 prompt = build_llm_prompt(
-                    passage=passage,
-                    queries=queries,
-                    gzip_norm=gzip_norm,
-                    semu_norm=semu_norm,
-                    overlap_len=ov_len,
-                    window_scores=win_scores,
+                    passage=st.session_state.get("passage_text", ""),
+                    queries=st.session_state.get("queries_text", "").splitlines()[:MAX_QUERIES],
+                    gzip_norm=st.session_state["gzip_norm"],
+                    semu_norm=st.session_state["semu_norm"],
+                    overlap_len=st.session_state["ov_len"],
+                    window_scores=st.session_state.get("win_scores", []),
                     brand_notes=st.session_state.get("brand_notes", "")
                 )
                 resp = call_gpt35(
@@ -807,7 +584,7 @@ if st.button("Score Passage"):
             else:
                 reasoning = resp.get("reasoning", "")
                 rewrite = resp.get("rewrite", "")
-                st.markdown("### Model’s reasoning (summary)")
+                st.markdown("### Model's reasoning (summary)")
                 if isinstance(reasoning, list):
                     st.markdown("\n".join([f"- {html.escape(x)}" for x in reasoning]), unsafe_allow_html=True)
                 else:
@@ -817,6 +594,8 @@ if st.button("Score Passage"):
                 st.text_area("Rewrite", value=rewrite, height=220)
 
                 st.markdown("### Diff vs original")
-                render_diff(passage, rewrite)
+                render_diff(st.session_state.get("passage_text", ""), rewrite)
     else:
-        st.info("🔒 Paste an OpenAI API key in the sidebar to enable the optional GPT-3.5 rewrite.")
+        st.info("📊 Run 'Score Passage' first to analyze your content, then use this rewrite feature.")
+else:
+    st.info("🔒 Paste an OpenAI API key in the sidebar to enable the GPT-3.5 rewrite feature.")
