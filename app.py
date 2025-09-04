@@ -111,7 +111,7 @@ def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-e
     q_labels = [f"Q{i+1}" for i in range(len(queries))]
     w_labels = [f"W{i+1}" for i in range(len(wins))]
 def get_unique_words(text: str) -> set:
-    """Get set of unique content words (non-stop, ≥3 chars, appearing only once)"""
+    return overlap_len, window_scores, sims, q_labels, w_labels    """Get set of unique content words (non-stop, ≥3 chars, appearing only once)"""
     toks = tokenize(text)
     ctoks = content_tokens(toks)
     # Count occurrences of each content token
