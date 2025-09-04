@@ -618,31 +618,11 @@ with st.sidebar:
     st.session_state["border_thresh"] = border_thresh
     MIN_WINDOW_BORDER_SCORE = border_thresh
 
-    st.markdown("### 🎨 Visualization Mode")
-    viz_mode = st.radio("Choose visualization focus",
-                        ["Windows Only", "Coverage Stripes Only", "Both (cluttered)"],
-                        index=init_state("viz_mode_idx", 0))
-    st.session_state["viz_mode_idx"] = ["Windows Only", "Coverage Stripes Only", "Both (cluttered)"].index(viz_mode)
-    if viz_mode == "Windows Only":
-        show_stripes, show_windows = False, True
-    elif viz_mode == "Coverage Stripes Only":
-        show_stripes, show_windows = True, False
-    else:
-        show_stripes, show_windows = True, True
-    st.session_state["show_stripes"] = show_stripes
-    st.session_state["show_windows"] = show_windows
-
-    st.markdown("### 🎨 Additional Overlays")
+    st.markdown("### 🎨 Overlays")
     show_sentence_chips = st.checkbox("Sentence chips with deltas", value=init_state("show_sentence_chips", True))
     st.session_state["show_sentence_chips"] = show_sentence_chips
     show_filler = st.checkbox("Highlight filler/hedging", value=init_state("show_filler", True))
     st.session_state["show_filler"] = show_filler
-    overstuff_limit = st.number_input("Over-stuffing threshold (exact repeats)", 0, 10, init_state("overstuff_limit", 2))
-    st.session_state["overstuff_limit"] = overstuff_limit
-
-    st.markdown("### ✂️ Editor helpers")
-    if st.button("Trim filler words"): st.session_state["apply_trim_filler"] = True
-    if st.button("Collapse repeated spaces"): st.session_state["apply_collapse_spaces"] = True
 
     st.markdown("### ✨ Optional: GPT-3.5 Rewrite")
     openai_key = st.text_input("OpenAI API Key", type="password", value=init_state("openai_key", ""))
@@ -667,14 +647,7 @@ with colB:
                                placeholder="e.g.\nluxury resort whistler\nski-in ski-out suites\nspa and wellness")
     queries = [q.strip() for q in raw_queries.splitlines() if q.strip()][:MAX_QUERIES]
 
-# Apply one-click editor helpers (persistent)
-if st.session_state.get("apply_trim_filler"):
-    passage = re.sub(FILLER_WORDS, "", passage)
-    passage = re.sub(r"\s{2,}", " ", passage).strip()
-    st.session_state["apply_trim_filler"] = False
-if st.session_state.get("apply_collapse_spaces"):
-    passage = re.sub(r"\s{2,}", " ", passage)
-    st.session_state["apply_collapse_spaces"] = False
+# Editor helpers removed for simplicity
 
 st.session_state["passage_text"] = passage
 st.session_state["queries_text"] = raw_queries
@@ -716,10 +689,10 @@ if st.button("Score Passage"):
         wins=wins,
         sims=sims,
         queries=queries,
-        show_per_query_stripes=st.session_state.get("show_stripes", True),
+        show_per_query_stripes=True,
         show_filler_flags=st.session_state.get("show_filler", True),
-        overstuff_threshold=int(st.session_state.get("overstuff_limit", 2)),
-        show_windows=st.session_state.get("show_windows", True)
+        overstuff_threshold=2,
+        show_windows=True
     )
     st.markdown("<div style='line-height:1.8; font-size:1.05rem;'>"+html_block+"</div>", unsafe_allow_html=True)
 
@@ -803,7 +776,7 @@ if st.button("Score Passage"):
         wins=wins,
         window_scores=win_scores,
         priorities=prio,
-        filler_count_limit=int(st.session_state.get("overstuff_limit", 2))
+        filler_count_limit=2
     )
     with st.expander("✅ Suggested next edits", expanded=True):
         render_edit_plan(plan, passage)
