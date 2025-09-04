@@ -5,7 +5,7 @@ import numpy as np
 import streamlit as st
 
 # ---------------- Config ----------------
-MIN_WINDOW_BORDER_SCORE = 0.0  # border visible only if score >= this; badges always shown
+MIN_WINDOW_BORDER_SCORE = 0.05
 
 # ---- Fast, torch-free embeddings ----
 from fastembed import TextEmbedding
