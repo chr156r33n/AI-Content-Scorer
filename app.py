@@ -1,12 +1,15 @@
-import math, gzip, io, re, html, hashlib
+import math, gzip, io, re, html, hashlib, json, textwrap, difflib
 from typing import List, Tuple, Dict
 from collections import Counter, defaultdict
 import numpy as np
 import streamlit as st
+import requests  # used ONLY when user provides an API key
 
 # ---------------- Config ----------------
 MIN_WINDOW_BORDER_SCORE = 0.0  # border visible only if score >= this; badges always shown
 MAX_QUERIES = 10
+OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+GPT35_DEFAULT = "gpt-3.5-turbo-0125"   # safe default; change if needed
 
 # ---- Fast, torch-free embeddings ----
 from fastembed import TextEmbedding
@@ -190,31 +193,26 @@ def render_passage(
     unique_words = get_unique_words(passage)
     uniq_spans = get_unique_word_spans(passage, unique_words)
 
-    # Build events with stable window IDs
     opens, closes = defaultdict(list), defaultdict(list)
-    win_meta = {}  # wid -> dict(score, contrib, render, style)
+    win_meta = {}
 
     for wid, ws in enumerate(window_scores):
         start, end, score, contrib, render_flag = ws
         start = max(0, min(len(passage), int(start)))
         end   = max(0, min(len(passage), int(end)))
         if end <= start: continue
-        # Only render windows if show_windows is True
         if show_windows:
             style = color_for_window(wid, float(score)) if render_flag else "padding:0;"
             win_meta[wid] = {"score": float(score), "contrib": contrib, "render": bool(render_flag), "style": style}
             opens[start].append({"type":"win", "id": wid})
             closes[end].append({"type":"win", "id": wid})
         else:
-            # Still store metadata for badges but don't render borders
             win_meta[wid] = {"score": float(score), "contrib": contrib, "render": False, "style": "padding:0;"}
 
-    # Unique word events
     for (s, e) in uniq_spans:
         opens[s].append({"type":"uniq"})
         closes[e].append({"type":"uniq"})
 
-    # Filler flags (optional)
     filler_spans = []
     if show_filler_flags:
         for m in FILLER_WORDS.finditer(passage):
@@ -223,10 +221,9 @@ def render_passage(
             opens[s].append({"type":"filler"})
             closes[e].append({"type":"filler"})
 
-    # Over-stuffing flags: exact query repeats beyond threshold
     over_spans = []
     if overstuff_threshold > 0 and queries:
-        low_queries = sorted(queries, key=len, reverse=True)  # longer first to avoid nested hits
+        low_queries = sorted(queries, key=len, reverse=True)
         counts = Counter()
         for q in low_queries:
             if not q.strip(): continue
@@ -244,14 +241,13 @@ def render_passage(
             opens[s].append({"type":"over"})
             closes[e].append({"type":"over"})
 
-    # Per-query stripes: compute top query per character (argmax over queries)
     q_top = None
     if show_per_query_stripes and len(queries):
         q_cmap = build_query_charmap(passage, wins, sims, len(queries))
         if q_cmap.size:
-            q_top = np.argmax(q_cmap, axis=0)  # (L,)
+            q_top = np.argmax(q_cmap, axis=0)
             q_max = np.max(q_cmap, axis=0)
-            q_top[q_max <= 0] = -1  # -1 = none
+            q_top[q_max <= 0] = -1
 
     boundaries = sorted(set([0, len(passage)] + list(opens.keys()) + list(closes.keys())))
     out, pos = [], 0
@@ -305,7 +301,6 @@ def render_passage(
                     chunk = html.escape(seg[i:j])
                     if qid >= 0:
                         color = QUERY_PALETTE[qid % len(QUERY_PALETTE)]
-                        # Use a more visible styling with background highlight and thicker border
                         chunk = f"<span style='background: {color}15; border-bottom: 3px solid {color}; border-radius: 2px; padding: 1px 2px;'>{chunk}</span>"
                     colored.append(chunk)
                     i = j
@@ -314,7 +309,6 @@ def render_passage(
             out.append(seg_html)
             pos = b
 
-        # Close inner layers first
         if b in closes:
             for _ in [e for e in closes[b] if e["type"] == "uniq"]:
                 close_uniq(); uniq_depth = max(0, uniq_depth-1)
@@ -325,7 +319,6 @@ def render_passage(
             for ev in [e for e in closes[b] if e["type"] == "win"]:
                 close_win(ev["id"])
 
-        # Open windows, then overlays (uniq, filler, over)
         if b in opens:
             for ev in sorted([e for e in opens[b] if e["type"] == "win"],
                              key=lambda e: win_meta[e["id"]]["score"], reverse=True):
@@ -337,7 +330,6 @@ def render_passage(
             for ev in [e for e in opens[b] if e["type"] == "over"]:
                 open_over(); over_depth += 1
 
-    # Safety close
     for wid in list(active_win_ids)[::-1]:
         close_win(wid)
     while uniq_depth > 0: close_uniq(); uniq_depth -= 1
@@ -501,35 +493,109 @@ def render_edit_plan(plan, passage: str):
         for it in plan["structure"]:
             show_item("Structure", it)
 
+# ----------------- OpenAI GPT-3.5 integration (optional) -----------------
+def build_llm_prompt(
+    passage: str,
+    queries: List[str],
+    gzip_norm: float,
+    semu_norm: float,
+    overlap_len: float,
+    window_scores: List[Tuple[int,int,float,list,bool]],
+    brand_notes: str | None = None
+) -> str:
+    # Compact window summary
+    ws_lines = []
+    for i, (s, e, sc, contrib, _flag) in enumerate(window_scores[:12]):
+        tops = ", ".join([f"Q{qi+1}@{qs:.2f}" for (qi, _q, qs) in contrib[:3]]) or "—"
+        ws_lines.append(f"W{i+1}[{s}:{e}] score={sc:.2f} tops={tops}")
+    ws_block = "\n".join(ws_lines) if ws_lines else "None"
+
+    q_block = "\n".join([f"Q{i+1}: {q}" for i, q in enumerate(queries)])
+    brand = f"\nBRAND GUARDRAILS:\n{brand_notes}\n" if brand_notes else ""
+
+    prompt = f"""You are an editor for web copy. Rewrite the passage to improve three axes while staying natural:
+- Relevance (semantic overlap with queries), 
+- Semantic Uniques (breadth),
+- Density (avoid fluff), keeping a balanced overall tone.
+
+Constraints:
+- Keep it concise, skimmable, and on brand.
+- Avoid keyword stuffing; use natural variations.
+- Keep meaning accurate; no fabricated facts.
+- Use simple language (aim B2 reading level).
+- Keep ~10–25% shorter if possible, unless brevity harms relevance.{brand}
+
+QUERIES:
+{q_block}
+
+CURRENT METRICS:
+- Density (gzip_norm): {gzip_norm:.2f}
+- Uniques (semu_norm): {semun_norm:.2f}
+- Overlap (overlap): {overlap_len:.2f}
+
+WINDOW SUMMARY (strongest spans):
+{ws_block}
+
+PASSAGE (rewrite this):
+\"\"\"{passage[:6000]}\"\"\"  # truncated for context safety
+
+Return JSON with keys:
+- "reasoning": 2–4 bullets stating what you changed and why.
+- "rewrite": the improved passage only.
+"""
+    return prompt
+
+def call_gpt35(api_key: str, prompt: str, temperature: float = 0.2, model: str = GPT35_DEFAULT) -> Dict:
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "temperature": float(temperature),
+        "messages": [
+            {"role": "system", "content": "You are a precise, concise web editor."},
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {"type": "json_object"}
+    }
+    try:
+        r = requests.post(OPENAI_CHAT_URL, headers=headers, data=json.dumps(payload), timeout=60)
+        if r.status_code != 200:
+            return {"error": f"OpenAI API error {r.status_code}: {r.text[:300]}"}
+        data = r.json()
+        content = data["choices"][0]["message"]["content"]
+        return json.loads(content)
+    except Exception as e:
+        return {"error": str(e)}
+
+def render_diff(old: str, new: str):
+    old_lines = [l.rstrip() for l in old.splitlines()]
+    new_lines = [l.rstrip() for l in new.splitlines()]
+    diff = difflib.unified_diff(old_lines, new_lines, fromfile="original", tofile="rewrite", lineterm="")
+    out = []
+    for line in diff:
+        if line.startswith("+") and not line.startswith("+++"):
+            out.append(f"<div style='color:#0b7a0b'> {html.escape(line)}</div>")
+        elif line.startswith("-") and not line.startswith("---"):
+            out.append(f"<div style='color:#b00020'> {html.escape(line)}</div>")
+        else:
+            out.append(f"<div style='color:#666'> {html.escape(line)}</div>")
+    if not out:
+        out = ["<div style='color:#666'>(No line-level changes)</div>"]
+    st.markdown("<div style='font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:0.9rem;'>"
+                + "\n".join(out) + "</div>", unsafe_allow_html=True)
+
 # ----------------- UI -----------------
 st.set_page_config(page_title="Semantic Overlap & Density (Editor Mode)", layout="wide")
 st.title("Semantic Overlap & Density — Editor Mode (FastEmbed)")
 
-# How-to accordion (compact, practical)
 with st.expander("📘 How to use", expanded=False):
     st.markdown("""
-**Goal:** Tweak your passage so it scores higher on *Relevance*, *Uniques*, and *Density*.
-
-**Steps**
-1. Paste your passage (left).
-2. Add 1–10 queries (right).
-3. Pick window size/stride in the sidebar.
-4. Click **Score Passage**.
-
-**Read the visuals**
-- **Colored boxes (W1, W2…):** strongest sections; badges show score + top queries.
-- **Green words:** unique content terms (appear once).
-- **Stripes:** which query dominates each span.
-- **Dotted/Dashed underlines:** filler / exact-match repeats.
-
-**Improve fast**
-- Cover gaps for priority queries.
-- Swap repeated words for on-brand synonyms.
-- Trim hedges; keep sentences tight.
-- Use the **Edit Plan** below for specific next steps.
+**Run analysis**, then optionally **get a GPT-3.5 rewrite** (only if you paste an API key).  
+No key = metrics + highlights only.
 """)
 
-# ---------- Persistent sidebar toggles ----------
 def init_state(key, default):
     if key not in st.session_state:
         st.session_state[key] = default
@@ -537,12 +603,9 @@ def init_state(key, default):
 
 with st.sidebar:
     st.markdown("### 🤖 Configuration")
-    model_name = st.selectbox(
-        "Embedding Model",
+    model_name = st.selectbox("Embedding Model",
         ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"],
-        index=init_state("model_idx", 0),
-        help="BAAI/bge-small-en-v1.5 is fast & accurate for English; intfloat/e5-small-v2 is a solid alternative."
-    )
+        index=init_state("model_idx", 0))
     st.session_state["model_idx"] = ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"].index(model_name)
 
     st.markdown("### 🪟 Windowing")
@@ -556,25 +619,16 @@ with st.sidebar:
     MIN_WINDOW_BORDER_SCORE = border_thresh
 
     st.markdown("### 🎨 Visualization Mode")
-    viz_mode = st.radio(
-        "Choose visualization focus",
-        ["Windows Only", "Coverage Stripes Only", "Both (cluttered)"],
-        index=init_state("viz_mode_idx", 0),
-        help="Windows show relevance scores, Stripes show query coverage. Both together can be hard to read."
-    )
+    viz_mode = st.radio("Choose visualization focus",
+                        ["Windows Only", "Coverage Stripes Only", "Both (cluttered)"],
+                        index=init_state("viz_mode_idx", 0))
     st.session_state["viz_mode_idx"] = ["Windows Only", "Coverage Stripes Only", "Both (cluttered)"].index(viz_mode)
-    
-    # Set visualization flags based on mode
     if viz_mode == "Windows Only":
-        show_stripes = False
-        show_windows = True
+        show_stripes, show_windows = False, True
     elif viz_mode == "Coverage Stripes Only":
-        show_stripes = True
-        show_windows = False
-    else:  # Both
-        show_stripes = True
-        show_windows = True
-    
+        show_stripes, show_windows = True, False
+    else:
+        show_stripes, show_windows = True, True
     st.session_state["show_stripes"] = show_stripes
     st.session_state["show_windows"] = show_windows
 
@@ -586,25 +640,21 @@ with st.sidebar:
     overstuff_limit = st.number_input("Over-stuffing threshold (exact repeats)", 0, 10, init_state("overstuff_limit", 2))
     st.session_state["overstuff_limit"] = overstuff_limit
 
-    st.markdown("### 🎯 Goals & priorities")
-    goal = st.radio("Optimize for", ["Balance (default)", "Overlap first"], index=init_state("goal_idx", 0))
-    st.session_state["goal_idx"] = 0 if goal == "Balance (default)" else 1
-
-    # Query priorities based on the current (or last typed) query list in session
-    st.markdown("Query weights")
-    weights = {}
-    q_text_for_weights = st.session_state.get("queries_text", "")
-    _q_lines = [q.strip() for q in q_text_for_weights.splitlines() if q.strip()][:MAX_QUERIES]
-    if "query_weights" not in st.session_state:
-        st.session_state["query_weights"] = {}
-    for i, q in enumerate(_q_lines):
-        w = st.number_input(f"Q{i+1}", 0.1, 3.0, float(st.session_state["query_weights"].get(i, 1.0)), 0.1, key=f"qw_{i}")
-        weights[i] = w
-    st.session_state["query_weights"] = weights
-
     st.markdown("### ✂️ Editor helpers")
     if st.button("Trim filler words"): st.session_state["apply_trim_filler"] = True
     if st.button("Collapse repeated spaces"): st.session_state["apply_collapse_spaces"] = True
+
+    st.markdown("### ✨ Optional: GPT-3.5 Rewrite")
+    openai_key = st.text_input("OpenAI API Key", type="password", value=init_state("openai_key", ""))
+    st.session_state["openai_key"] = openai_key
+    gpt_temp = st.slider("Creativity (temperature)", 0.0, 1.0, init_state("gpt_temp", 0.2), 0.05)
+    st.session_state["gpt_temp"] = gpt_temp
+    brand_notes = st.text_area("Brand guardrails (tone, style, banned words, etc.)",
+                               value=init_state("brand_notes", ""))
+    st.session_state["brand_notes"] = brand_notes
+    gpt_model = st.text_input("GPT-3.5 model", value=init_state("gpt_model", GPT35_DEFAULT),
+                              help="Defaults to gpt-3.5-turbo-0125. Change if needed.")
+    st.session_state["gpt_model"] = gpt_model
 
 # Inputs
 colA, colB = st.columns([1,1])
@@ -626,7 +676,6 @@ if st.session_state.get("apply_collapse_spaces"):
     passage = re.sub(r"\s{2,}", " ", passage)
     st.session_state["apply_collapse_spaces"] = False
 
-# Persist current text/queries
 st.session_state["passage_text"] = passage
 st.session_state["queries_text"] = raw_queries
 
@@ -650,7 +699,7 @@ if st.button("Score Passage"):
     # --- Metrics ---
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Gzip (density, norm)", f"{gzip_norm:.2f}")
-    m2.metric("Semantic Uniques (norm)", f"{semu_norm:.2f}")
+    m2.metric("Semantic Uniques (norm)", f"{semun_norm:.2f}")
     m3.metric("Overlap (relevance)",    f"{ov_len:.2f}")
     m4.metric("Content Balance Score",  f"{final:.2f}")
 
@@ -667,9 +716,9 @@ if st.button("Score Passage"):
         wins=wins,
         sims=sims,
         queries=queries,
-        show_per_query_stripes=show_stripes,
-        show_filler_flags=show_filler,
-        overstuff_threshold=int(overstuff_limit),
+        show_per_query_stripes=st.session_state.get("show_stripes", True),
+        show_filler_flags=st.session_state.get("show_filler", True),
+        overstuff_threshold=int(st.session_state.get("overstuff_limit", 2)),
         show_windows=st.session_state.get("show_windows", True)
     )
     st.markdown("<div style='line-height:1.8; font-size:1.05rem;'>"+html_block+"</div>", unsafe_allow_html=True)
@@ -690,119 +739,41 @@ if st.button("Score Passage"):
     st.markdown("### Query Key")
     st.markdown(", ".join([f"**Q{i+1}**: <span style='color:{QUERY_PALETTE[i%len(QUERY_PALETTE)]}'>{html.escape(q)}</span>"
                            for i, q in enumerate(queries)]) , unsafe_allow_html=True)
-    
-    # Add explanation of per-query stripes if they're enabled
-    if show_stripes:
-        st.markdown("### Per-Query Coverage Stripes")
-        st.markdown("""
-        <div style='background: #f8f9fa; padding: 10px; border-radius: 5px; margin: 10px 0;'>
-        <strong>💡 How to read the stripes:</strong><br>
-        • <span style='background: #e91e6315; border-bottom: 3px solid #e91e63; padding: 1px 2px; border-radius: 2px;'>Colored background + thick border</span> = This text best matches that query<br>
-        • Each query gets a unique color from the palette above<br>
-        • Stripes show which parts of your content align with specific search terms<br>
-        • Use this to identify gaps where you need to add more relevant content
-        </div>
-        """, unsafe_allow_html=True)
 
     # --- Sentence chips with deltas ---
-    if show_sentence_chips:
+    if st.session_state.get("show_sentence_chips", True):
         st.markdown("### Sentence Chips (Δ vs previous run)")
         sents = split_sents(passage)
         chips = []
         for (s, e, txt) in sents:
             m = sentence_metrics(txt, queries, model_name=model_name)
             chips.append((txt, m))
-        # Get previous scores with error handling
         prev = st.session_state.get("prev_sentence_scores", {})
         if not isinstance(prev, dict):
             prev = {}
             st.session_state["prev_sentence_scores"] = prev
-        
         curr = {}
-        delta_count = 0
-        
         for txt, m in chips:
-            # Create stable hash key for sentence
             key = hashlib.md5(txt.encode("utf-8")).hexdigest()
             curr[key] = m
-            
-            # Get previous metrics for this sentence
             d = prev.get(key, None)
-            has_previous = d is not None
-            
             def fmt(val): return f"{val:.2f}"
             def delta(curr, prev): 
                 return f"{(curr - prev):+0.02f}" if prev is not None else "—"
-            
-            # Calculate deltas safely
             density = fmt(m["density"]); d_d = delta(m["density"], d["density"]) if d else "—"
             uniq    = fmt(m["uniques"]); d_u = delta(m["uniques"], d["uniques"]) if d else "—"
             ov      = fmt(m["overlap"]); d_o = delta(m["overlap"], d["overlap"]) if d else "—"
-            
-            # Count how many sentences have deltas
-            if has_previous:
-                delta_count += 1
-            
-            # Color code the delta display
-            delta_color = "#28a745" if has_previous else "#6c757d"  # green if has delta, gray if new
-            
             st.markdown(
                 f"<div style='margin:4px 0; padding:6px 8px; border:1px solid #eee; border-radius:6px;'>"
                 f"<div style='font-size:0.95rem; margin-bottom:4px'>{html.escape(txt)}</div>"
                 f"<div style='font-size:0.85rem; color:#444'>"
-                f"Overlap <b>{ov}</b> (<span style='color:{delta_color}'>{d_o}</span>) • "
-                f"Uniques <b>{uniq}</b> (<span style='color:{delta_color}'>{d_u}</span>) • "
-                f"Density <b>{density}</b> (<span style='color:{delta_color}'>{d_d}</span>)"
+                f"Overlap <b>{ov}</b> (<span style='color:#666'>{d_o}</span>) • "
+                f"Uniques <b>{uniq}</b> (<span style='color:#666'>{d_u}</span>) • "
+                f"Density <b>{density}</b> (<span style='color:#666'>{d_d}</span>)"
                 f"</div></div>",
                 unsafe_allow_html=True
             )
-        
-        # Store current scores for next run
         st.session_state["prev_sentence_scores"] = curr
-        
-        # Show cache status
-        total_sentences = len(chips)
-        if delta_count > 0:
-            st.info(f"📊 Cache working: {delta_count}/{total_sentences} sentences have delta values from previous run")
-        else:
-            st.info(f"🆕 First run: {total_sentences} sentences (no previous data to compare)")
-    # --- Debug: Cache Status ---
-    if st.checkbox('🔍 Show cache debug info', value=False):
-        st.markdown('### Cache Debug Information')
-        
-        # Show current session state keys
-        st.write('**Session State Keys:**', list(st.session_state.keys()))
-        
-        # Show previous sentence scores
-        prev_scores = st.session_state.get('prev_sentence_scores', {})
-        st.write(f'**Previous Sentence Scores:** {len(prev_scores)} entries')
-        if prev_scores:
-            st.write('Sample keys:', list(prev_scores.keys())[:3])
-            st.write('Sample values:', {k: v for k, v in list(prev_scores.items())[:2]})
-        
-        # Show current passage and queries
-        current_passage = st.session_state.get('passage_text', '')
-        current_queries = st.session_state.get('queries_text', '')
-        st.write(f'**Current Passage Length:** {len(current_passage)} chars')
-        st.write(f'**Current Queries:** {len(current_queries.splitlines())} lines')
-        
-        # Show sentence hashing for current passage
-        if current_passage:
-            import hashlib
-            sents = split_sents(current_passage)
-            st.write(f'**Current Sentences:** {len(sents)} sentences')
-            for i, (s, e, txt) in enumerate(sents[:3]):
-                key = hashlib.md5(txt.encode('utf-8')).hexdigest()
-                st.write(f'  S{i+1}: {key[:8]}... ("{txt[:50]}...")')
-        
-        # Clear cache button
-        if st.button('🗑️ Clear all cache'):
-            for key in list(st.session_state.keys()):
-                if key.startswith('prev_') or key in ['passage_text', 'queries_text']:
-                    del st.session_state[key]
-            st.success('Cache cleared!')
-            st.rerun()
-
 
     # --- Repetition meter + synonym nudges ---
     st.markdown("### Repetition Meter & Synonym Nudges")
@@ -824,8 +795,6 @@ if st.button("Score Passage"):
 
     # --- Edit plan (actionable) ---
     st.markdown("### Edit Plan")
-    gap_bias = 0.12 if st.session_state.get("goal_idx", 0) == 1 else 0.15  # (kept for future tuning)
-    stuff_limit = int(st.session_state.get("overstuff_limit", 2))
     prio = query_priorities(queries, st.session_state.get("query_weights", {}))
     plan = build_edit_plan(
         passage=passage,
@@ -834,29 +803,47 @@ if st.button("Score Passage"):
         wins=wins,
         window_scores=win_scores,
         priorities=prio,
-        filler_count_limit=stuff_limit
+        filler_count_limit=int(st.session_state.get("overstuff_limit", 2))
     )
-
-    with st.expander("🧭 How to use these results", expanded=False):
-        st.markdown("""
-- **Add** content where *coverage gaps* appear for your priority queries.
-- **Trim** exact repeats and **filler** to raise uniques and keep density healthy.
-- **Rephrase** long or passive sentences for clarity and variety.
-- **Restructure**: surface the strongest section earlier; strengthen thin sections with specifics.
-""")
-
-    with st.expander("✅ Suggested next edits (top picks)", expanded=True):
+    with st.expander("✅ Suggested next edits", expanded=True):
         render_edit_plan(plan, passage)
 
-    # --- Window Summary ---
-    st.markdown("### Window Summary")
-    for i, ws in enumerate(win_scores):
-        start, end, score, contrib, render_flag = ws
-        top = ", ".join([f"Q{qi+1} {qs:.2f}" for (qi, _q, qs) in (contrib[:3] if contrib else [])]) or "—"
-        st.write(f"**W{i+1}** [{start}:{end}] • score **{score:.2f}** • top queries: {top}")
+    # ---------------- GPT-3.5 Rewrite (only if API key present) ----------------
+    if st.session_state.get("openai_key", "").strip():
+        st.markdown("## ✨ GPT-3.5 Rewrite (optional)")
+        st.caption("Runs only when you click the button. We send the passage, queries, and high-level scores—no analytics beyond that.")
+        if st.button("Generate GPT-3.5 Rewrite"):
+            with st.spinner("Calling GPT-3.5…"):
+                prompt = build_llm_prompt(
+                    passage=passage,
+                    queries=queries,
+                    gzip_norm=gzip_norm,
+                    semu_norm=semun_norm,
+                    overlap_len=ov_len,
+                    window_scores=win_scores,
+                    brand_notes=st.session_state.get("brand_notes", "")
+                )
+                resp = call_gpt35(
+                    api_key=st.session_state["openai_key"],
+                    prompt=prompt,
+                    temperature=float(st.session_state.get("gpt_temp", 0.2)),
+                    model=st.session_state.get("gpt_model", GPT35_DEFAULT)
+                )
+            if "error" in resp:
+                st.error(resp["error"])
+            else:
+                reasoning = resp.get("reasoning", "")
+                rewrite = resp.get("rewrite", "")
+                st.markdown("### Model’s reasoning (summary)")
+                if isinstance(reasoning, list):
+                    st.markdown("\n".join([f"- {html.escape(x)}" for x in reasoning]), unsafe_allow_html=True)
+                else:
+                    st.markdown(textwrap.indent(str(reasoning), "- "), unsafe_allow_html=False)
 
-    with st.expander("Details"):
-        st.write(f"Raw gzip ratio: {gr:.4f}")
-        st.write(f"Tokens: {tok_count} | Content tokens: {ctok_count} | Unique content tokens (≥3): {uniq_count}")
-        st.write("Window tuples (start, end, score, top queries (idx, text, score), render_flag):")
-        st.write(win_scores)
+                st.markdown("### Rewritten passage")
+                st.text_area("Rewrite", value=rewrite, height=220)
+
+                st.markdown("### Diff vs original")
+                render_diff(passage, rewrite)
+    else:
+        st.info("🔒 Paste an OpenAI API key in the sidebar to enable the optional GPT-3.5 rewrite.")
