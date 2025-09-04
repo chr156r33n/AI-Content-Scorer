@@ -2,6 +2,8 @@ import math, gzip, io, re
 from typing import List, Tuple
 import numpy as np
 import streamlit as st
+import html
+from collections import defaultdict
 
 # ---- Fast, torch-free embeddings ----
 from fastembed import TextEmbedding
@@ -124,36 +126,93 @@ def get_unique_words(text: str) -> set:
 
 def color_for_score(v: float) -> str:
     v = max(0.0, min(1.0, v))
-    width = max(1, int(v * 3))  # 1-3px border width
-    opacity = max(0.3, v)       # 30%-100% opacity
-    return f"border: {width}px dotted rgba(255, 0, 0, {opacity:.2f}); padding: 4px 6px; margin: 2px;"
+    width = max(1, int(round(v * 3)))  # 1–3px
+    opacity = max(0.35, min(1.0, v))
+    return f"border: {width}px dotted rgba(255,0,0,{opacity:.2f}); padding: 2px 3px; border-radius: 2px;"
+
+_WORD = re.compile(r"\b\w+\b")
 
 def render_highlighted(passage: str, window_scores: List[Tuple]) -> str:
-    """Render passage with window highlighting and unique word coloring"""
-    # Get unique words for green highlighting
+    """
+    Renders the passage with:
+      - red dotted borders around each window span (can nest for overlaps)
+      - green bold for unique content words (only outside any window)
+    """
+    if not passage:
+        return ""
+
     unique_words = get_unique_words(passage)
-    
-    # Start with the original passage
-    result = passage
-    
-    # Apply window span highlighting with red dotted borders
-    # Sort by start position and apply from end to beginning to avoid position shifts
-    sorted_windows = sorted(window_scores, key=lambda x: x[0])
-    
-    for start, end, score, contributing_queries in reversed(sorted_windows):
-        if score > 0.1:
-            window_text = result[start:end]
-            
-            # Format query breakdown
-            breakdown_text = " | ".join([f"Q{q_idx+1}:{q_score:.2f}" for q_idx, _, q_score in contributing_queries[:2]])
-            annotation = f"<sup style='font-size:0.7em; color:#666;'>({score:.2f} | {breakdown_text})</sup>"
-            
-            # Use span with inline-block to avoid breaking text flow
-            window_html = f"<span style='{color_for_score(score)}; display: inline-block;'>{window_text}{annotation}</span>"
-            result = result[:start] + window_html + result[end:]
-    
-    # Now apply unique word coloring to text that's NOT inside window highlights
-    # We'll process the result and only color words that are not inside <span> tags
+
+    opens  = defaultdict(list)
+    closes = defaultdict(list)
+    for (start, end, score, contrib) in window_scores:
+        start = max(0, min(len(passage), start))
+        end   = max(0, min(len(passage), end))
+        if end <= start:
+            continue
+        opens[start].append({"score": float(score), "contrib": contrib})
+        closes[end].append({"score": float(score), "contrib": contrib})
+
+    out = []
+    pos = 0
+    stack: List[dict] = []
+
+    boundaries = sorted(set([0, len(passage)] + list(opens.keys()) + list(closes.keys())))
+
+    def emit_segment(s: str, window_depth: int):
+        # HTML-escape raw segment
+        esc = html.escape(s)
+        if window_depth == 0:
+            # Only outside windows, color unique words
+            def repl(m):
+                w = m.group(0)
+                return f"<span style='color:green; font-weight:600'>{w}</span>" if w.lower() in unique_words else w
+            esc = _WORD.sub(repl, esc)
+        out.append(esc)
+
+    for i, b in enumerate(boundaries):
+        # Flush text leading up to this boundary
+        if b > pos:
+            emit_segment(passage[pos:b], window_depth=len(stack))
+            pos = b
+
+        # 3a) Close any windows ending here (LIFO to close innermost first)
+        if b in closes and closes[b]:
+            # Find how many to close that match current depth (by count)
+            # We close in reverse order of opens (stack order)
+            to_close = len(closes[b])
+            for _ in range(to_close):
+                if not stack:
+                    break
+                win = stack.pop()
+                # Optional: show a tiny score badge before closing
+                score = win.get("score", 0.0)
+                contrib = win.get("contrib", [])
+                # Top-2 query contributions as text like Q1:0.72 | Q3:0.66
+                if contrib:
+                    parts = [f"Q{q_idx+1}:{q_score:.2f}" for (q_idx, _q, q_score) in contrib[:2]]
+                    badge = f" ({score:.2f} | {' | '.join(parts)})"
+                else:
+                    badge = f" ({score:.2f})"
+                out.append(f"<sup style='font-size:0.7em; color:#666'>{html.escape(badge)}</sup>")
+                out.append("</span>")  # close the window box
+
+        # 3b) Open any windows starting here (open outermost first).
+        # If multiple start at same pos, open by descending score so stronger window is outer.
+        if b in opens and opens[b]:
+            for win in sorted(opens[b], key=lambda d: d["score"], reverse=True):
+                style = color_for_score(win["score"])
+                out.append(f"<span style='{style}'>")
+                stack.append(win)
+
+    # If any windows left unclosed (shouldn't happen), close them
+    while stack:
+        win = stack.pop()
+        score = win.get("score", 0.0)
+        out.append(f"<sup style='font-size:0.7em; color:#666'>({score:.2f})</sup></span>")
+
+    return "".join(out)
+
     def color_unique_words(match):
         word = match.group(0)
         word_lower = word.lower()
