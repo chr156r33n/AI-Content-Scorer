@@ -672,32 +672,3 @@ if st.button("Score Passage"):
         st.write(f"Tokens: {tok_count} | Content tokens: {ctok_count} | Unique content tokens (≥3): {uniq_count}")
         st.write("Window tuples (start, end, score, top queries (idx, text, score), render_flag):")
         st.write(win_scores)
-
-with st.expander("📘 How to use", expanded=False):
-    st.markdown("""
-**Goal:** Tweak your passage so it scores higher on *Relevance*, *Uniques*, and *Density*.
-
-**Steps**
-1. **Paste your passage** in the left box above.
-2. **Add 1–10 queries** (one per line) on the right.
-3. Adjust **Window Size/Stride** in the sidebar.
-4. Click **Score Passage**.
-
-**What you’ll see**
-- **Colored window boxes (W1, W2, …):** sections most related to your queries. Badge shows the score and top contributing queries.
-- **Green unique words:** content terms that appear only once (helps breadth).
-- **Per-query stripes (optional):** thin underlines showing which query is strongest at each span.
-- **Sentence chips (optional):** per-sentence Overlap • Uniques • Density (with Δ vs last run).
-- **Filler/over-stuffing flags (optional):** dotted underlines for hedging words and dashed for repeated exact queries.
-
-**How to improve fast**
-- Add or tighten content **where stripes/windows are missing** for key queries.
-- Swap repeated words for **on-brand synonyms** (see *Repetition Meter & Synonym Nudges*).
-- Trim **hedge/filler** phrases; keep sentences concise.
-- Use **window threshold** to focus on your strongest sections, then iterate.
-
-**Tips**
-- 5–10 queries is the sweet spot.
-- Very short passages (<25 tokens) produce unstable scores.
-- Balance matters: aim for **higher overlap** without repeating the same terms.
-""")
