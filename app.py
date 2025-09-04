@@ -1,18 +1,18 @@
-import math, gzip, io, re, html
-from typing import List, Tuple
+import math, gzip, io, re, html, hashlib
+from typing import List, Tuple, Dict
 from collections import Counter, defaultdict
 import numpy as np
 import streamlit as st
 
 # ---------------- Config ----------------
 MIN_WINDOW_BORDER_SCORE = 0.0  # border visible only if score >= this; badges always shown
+MAX_QUERIES = 10
 
 # ---- Fast, torch-free embeddings ----
 from fastembed import TextEmbedding
 
 @st.cache_resource(show_spinner=False)
 def get_embedder(model_name: str = "BAAI/bge-small-en-v1.5"):
-    # First call downloads a small ONNX (~50–90MB) into HF cache; later runs are instant
     return TextEmbedding(model_name=model_name)
 
 # ----------------- Text utils -----------------
@@ -21,7 +21,9 @@ STOP = {"the","a","an","and","or","but","if","then","so","as","at","by","for","i
         "your","our","their","from","over","into","out","up","down","about","than","too","very"}
 TOKEN_SPLIT = re.compile(r"[^\w'-]+", re.UNICODE)
 SENT_SPLIT  = re.compile(r"(?<=[.!?])\s+")
-WORD_RE     = re.compile(r"\b\w+\b")
+WORD_RE     = re.compile(r"\b\w+\b", re.UNICODE)
+
+FILLER_WORDS = re.compile(r"\b(?:very|really|just|quite|simply|actually|basically|kind of|sort of|maybe|perhaps)\b", re.I)
 
 def tokenize(t: str) -> List[str]:
     return [x for x in TOKEN_SPLIT.split(t.lower()) if x]
@@ -72,28 +74,30 @@ def sliding_windows(sents, win_size=3, stride=2):
 # ----------------- Embeddings -----------------
 def embed_fastembed(texts: List[str], model_name="BAAI/bge-small-en-v1.5") -> np.ndarray:
     model = get_embedder(model_name)
-    vecs = np.stack(list(model.embed(texts))).astype(np.float32)  # generator -> array
+    vecs = np.stack(list(model.embed(texts))).astype(np.float32)
     norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12
-    return vecs / norms  # L2-normalized
+    return vecs / norms
 
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    return a @ b.T  # normalized dot = cosine
+    return a @ b.T
 
 def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-en-v1.5",
                   win_size=3, stride=2):
     """
     Returns:
       overlap_len (float),
-      window_scores: list of (start, end, max_sim, contributing_queries[(q_idx, query, score), ...], render_flag),
+      window_scores: list of (start, end, max_sim, contrib[(q_idx, query, score), ...], render_flag),
       sims (Q x W),
-      q_labels, w_labels
+      q_labels, w_labels,
+      wins (list of (start,end,text)) for per-query stripes
     """
     sents = split_sents(passage)
     wins = sliding_windows(sents, win_size=win_size, stride=stride) or [(0, len(passage), passage)]
     w_texts = [w[2] for w in wins]; w_spans = [(w[0], w[1]) for w in wins]
 
-    vecs = embed_fastembed(queries + w_texts, model_name=model_name)
-    q_vecs, w_vecs = vecs[:len(queries)], vecs[len(queries):]
+    vecs = embed_fastembed(queries + w_texts, model_name=model_name) if queries else np.zeros((0,0))
+    q_vecs = vecs[:len(queries)] if queries else np.zeros((0,0))
+    w_vecs = vecs[len(queries):] if queries else np.zeros((len(wins),0))
     sims = cosine_sim(q_vecs, w_vecs) if (len(queries) and len(w_texts)) else np.zeros((0,0))
 
     per_q_max = np.max(sims, axis=1) if sims.size else np.array([0.0]*len(queries))
@@ -112,7 +116,6 @@ def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-e
             for j, q in enumerate(queries):
                 if i < sims.shape[1]:
                     qscore = sims[j, i]
-                    # include queries within 80% of window's max
                     if max_score > 0 and qscore >= max_score * 0.8:
                         contributing.append((j, q, float(qscore)))
         contributing.sort(key=lambda x: x[2], reverse=True)
@@ -121,54 +124,69 @@ def overlap_embed(passage: str, queries: List[str], model_name="BAAI/bge-small-e
 
     q_labels = [f"Q{i+1}" for i in range(len(queries))]
     w_labels = [f"W{i+1}" for i in range(len(wins))]
-    return overlap_len, window_scores, sims, q_labels, w_labels
+    return overlap_len, window_scores, sims, q_labels, w_labels, wins
 
-# ----------------- Visual rendering -----------------
+# ----------------- Visual rendering (windows + uniques) -----------------
 WINDOW_PALETTE = [
     "#e53935", "#1e88e5", "#43a047", "#fb8c00", "#8e24aa",
     "#00897b", "#6d4c41", "#3949ab", "#c0ca33", "#f4511e"
 ]
+QUERY_PALETTE = [
+    "#d81b60", "#3949ab", "#00897b", "#f4511e", "#5e35b1",
+    "#039be5", "#7cb342", "#8d6e63", "#fdd835", "#00acc1"
+]
 
 def color_for_window(win_idx: int, score: float) -> str:
-    """Dotted border style per-window with thickness by score."""
     c = WINDOW_PALETTE[win_idx % len(WINDOW_PALETTE)]
     v = max(0.0, min(1.0, score))
     width = max(1, int(round(v * 3)))   # 1–3px
     alpha = max(0.35, min(1.0, v))
-    return (
-        f"border: {width}px dotted {c};"
-        f"padding: 2px 3px; border-radius: 2px;"
-        f"opacity: {alpha:.2f};"
-    )
+    return f"border: {width}px dotted {c}; padding: 2px 3px; border-radius: 2px; opacity: {alpha:.2f};"
 
 def get_unique_words(text: str) -> set:
-    """Unique content words: non-stop, >=3 chars, appear exactly once (lowercased)."""
     toks = tokenize(text)
     ctoks = content_tokens(toks)
     counts = Counter(ctoks)
     return {w for w,c in counts.items() if c == 1 and len(w) >= 3}
 
 def get_unique_word_spans(passage: str, unique_words: set) -> list[tuple[int,int]]:
-    """Return (start,end) spans for unique words (case-insensitive) in the original text."""
     spans = []
     for m in WORD_RE.finditer(passage):
         if m.group(0).lower() in unique_words:
             spans.append((m.start(), m.end()))
     return spans
 
-def render_highlighted(passage: str, window_scores: List[Tuple[int,int,float,list,bool]]) -> str:
+def build_query_charmap(passage: str, wins: List[Tuple[int,int,str]], sims: np.ndarray, q_count: int) -> np.ndarray:
     """
-    ID-aware renderer (handles overlapping & crossing windows):
-      - Each window has a unique color (stable by index in window_scores).
-      - Tiny score badge at open; detailed badge (+top queries) at close.
-      - Green bold for unique words everywhere (inside/outside windows).
-      - Borders shown only if score >= MIN_WINDOW_BORDER_SCORE; badges always shown.
+    Returns (q_count, len(passage)) map where cell is similarity assigned from its window span.
+    If a char belongs to multiple windows, keep the max per query.
     """
-    if not passage:
-        return ""
+    L = len(passage)
+    cmap = np.zeros((q_count, L), dtype=np.float32)
+    if sims.size == 0: return cmap
+    for wi, (s, e, _t) in enumerate(wins):
+        s = max(0, min(L, s)); e = max(0, min(L, e))
+        if e <= s: continue
+        for qi in range(q_count):
+            val = float(sims[qi, wi])
+            if val <= 0: continue
+            cmap[qi, s:e] = np.maximum(cmap[qi, s:e], val)
+    return cmap
 
+def render_passage(
+    passage: str,
+    window_scores: List[Tuple[int,int,float,list,bool]],
+    wins: List[Tuple[int,int,str]],
+    sims: np.ndarray,
+    queries: List[str],
+    show_per_query_stripes: bool,
+    show_filler_flags: bool,
+    overstuff_threshold: int
+) -> str:
+    """ID-aware renderer with optional per-query stripes and filler/over-stuffing overlays."""
+    if not passage: return ""
     unique_words = get_unique_words(passage)
-    uniq_spans    = get_unique_word_spans(passage, unique_words)
+    uniq_spans = get_unique_word_spans(passage, unique_words)
 
     # Build events with stable window IDs
     opens, closes = defaultdict(list), defaultdict(list)
@@ -178,8 +196,7 @@ def render_highlighted(passage: str, window_scores: List[Tuple[int,int,float,lis
         start, end, score, contrib, render_flag = ws
         start = max(0, min(len(passage), int(start)))
         end   = max(0, min(len(passage), int(end)))
-        if end <= start:
-            continue
+        if end <= start: continue
         style = color_for_window(wid, float(score)) if render_flag else "padding:0;"
         win_meta[wid] = {"score": float(score), "contrib": contrib, "render": bool(render_flag), "style": style}
         opens[start].append({"type":"win", "id": wid})
@@ -190,148 +207,267 @@ def render_highlighted(passage: str, window_scores: List[Tuple[int,int,float,lis
         opens[s].append({"type":"uniq"})
         closes[e].append({"type":"uniq"})
 
+    # Filler flags (optional)
+    filler_spans = []
+    if show_filler_flags:
+        for m in FILLER_WORDS.finditer(passage):
+            filler_spans.append((m.start(), m.end()))
+        for (s, e) in filler_spans:
+            opens[s].append({"type":"filler"})
+            closes[e].append({"type":"filler"})
+
+    # Over-stuffing flags: exact query repeats beyond threshold
+    over_spans = []
+    if overstuff_threshold > 0 and queries:
+        low_queries = sorted(queries, key=len, reverse=True)  # longer first to avoid nested hits
+        counts = Counter()
+        # First pass: count occurrences (case-insensitive, word-boundary-ish)
+        for q in low_queries:
+            if not q.strip(): continue
+            pattern = re.compile(rf"(?i)\b{re.escape(q)}\b")
+            counts[q] = len(list(pattern.finditer(passage)))
+        # Second pass: mark occurrences beyond threshold
+        for q in low_queries:
+            if counts[q] > overstuff_threshold:
+                pattern = re.compile(rf"(?i)\b{re.escape(q)}\b")
+                idx = 0
+                for m in pattern.finditer(passage):
+                    idx += 1
+                    if idx > overstuff_threshold:
+                        over_spans.append((m.start(), m.end()))
+        for (s, e) in over_spans:
+            opens[s].append({"type":"over"})
+            closes[e].append({"type":"over"})
+
+    # Per-query stripes: compute top query per character (argmax over queries)
+    q_top = None
+    if show_per_query_stripes and len(queries):
+        q_cmap = build_query_charmap(passage, wins, sims, len(queries))
+        # pick query with highest score at each char, if >0
+        if q_cmap.size:
+            q_top = np.argmax(q_cmap, axis=0)  # (L,)
+            q_max = np.max(q_cmap, axis=0)
+            q_top[q_max <= 0] = -1  # -1 = none
+
     boundaries = sorted(set([0, len(passage)] + list(opens.keys()) + list(closes.keys())))
     out, pos = [], 0
-    active_win_ids = []   # track exact active windows (order of opening)
+    active_win_ids = []
     uniq_depth = 0
+    filler_depth = 0
+    over_depth = 0
 
     def open_win(wid: int):
-        meta = win_meta[wid]
-        score = meta["score"]
+        meta = win_meta[wid]; score = meta["score"]
         out.append(f"<sup style='font-size:0.65em; color:#888'>{score:.2f}</sup>")
         out.append(f"<span data-win='{wid}' style='{meta['style']}'>")
         active_win_ids.append(wid)
 
     def close_win(wid: int):
         if wid in active_win_ids:
-            meta = win_meta[wid]
-            score, contrib = meta["score"], meta["contrib"]
+            meta = win_meta[wid]; score, contrib = meta["score"], meta["contrib"]
             parts = [f"Q{qi+1}:{qs:.2f}" for (qi, _q, qs) in (contrib[:2] if contrib else [])]
             badge = f" ({score:.2f}" + (f" | {' | '.join(parts)}" if parts else "") + ")"
             out.append(f"<sup style='font-size:0.7em; color:#666'>{html.escape(badge)}</sup>")
             out.append("</span>")
             active_win_ids.remove(wid)
 
-    def open_uniq():
-        nonlocal uniq_depth
-        out.append("<span style='color:green; font-weight:600'>")
-        uniq_depth += 1
+    def open_uniq():  out.append("<span style='color:green; font-weight:600'>")
+    def close_uniq(): out.append("</span>")
 
-    def close_uniq():
-        nonlocal uniq_depth
-        if uniq_depth > 0:
-            uniq_depth -= 1
-            out.append("</span>")
+    def open_filler():
+        out.append("<span style='border-bottom:2px dotted rgba(120,120,120,0.75)'>")
+    def close_filler():
+        out.append("</span>")
+
+    def open_over():
+        out.append("<span style='border-bottom:2px dashed rgba(200,0,0,0.8)'>")
+    def close_over():
+        out.append("</span>")
 
     for b in boundaries:
-        # Emit plain text between last boundary and this boundary
         if b > pos:
-            out.append(html.escape(passage[pos:b]))
+            seg = passage[pos:b]
+            seg_html = html.escape(seg)
+
+            # Apply per-query stripes as border-bottom color (single top-query stripe)
+            if q_top is not None:
+                colored = []
+                i = 0
+                while i < len(seg):
+                    gidx = pos + i
+                    qid = q_top[gidx] if 0 <= gidx < len(q_top) else -1
+                    j = i + 1
+                    while j < len(seg) and (pos + j) < len(q_top) and q_top[pos + j] == qid:
+                        j += 1
+                    chunk = html.escape(seg[i:j])
+                    if qid >= 0:
+                        color = QUERY_PALETTE[qid % len(QUERY_PALETTE)]
+                        chunk = f"<span style='border-bottom:2px solid {color}'>{chunk}</span>"
+                    colored.append(chunk)
+                    i = j
+                seg_html = "".join(colored)
+
+            out.append(seg_html)
             pos = b
 
-        # Close events at this boundary
+        # Close inner layers first
         if b in closes:
-            # Close unique spans first (innermost)
             for _ in [e for e in closes[b] if e["type"] == "uniq"]:
-                close_uniq()
-            # Close each window that *ends here* by exact id (handles crossing)
+                close_uniq(); uniq_depth = max(0, uniq_depth-1)
+            for _ in [e for e in closes[b] if e["type"] == "filler"]:
+                close_filler(); filler_depth = max(0, filler_depth-1)
+            for _ in [e for e in closes[b] if e["type"] == "over"]:
+                close_over(); over_depth = max(0, over_depth-1)
             for ev in [e for e in closes[b] if e["type"] == "win"]:
                 close_win(ev["id"])
 
-        # Open events at this boundary
+        # Open windows, then overlays (uniq, filler, over)
         if b in opens:
-            # Open windows first (outer), sorted by score desc to put stronger outside
             for ev in sorted([e for e in opens[b] if e["type"] == "win"],
-                             key=lambda e: win_meta[e["id"]]["score"],
-                             reverse=True):
+                             key=lambda e: win_meta[e["id"]]["score"], reverse=True):
                 open_win(ev["id"])
-            # Then open unique spans (inner)
             for ev in [e for e in opens[b] if e["type"] == "uniq"]:
-                open_uniq()
+                open_uniq(); uniq_depth += 1
+            for ev in [e for e in opens[b] if e["type"] == "filler"]:
+                open_filler(); filler_depth += 1
+            for ev in [e for e in opens[b] if e["type"] == "over"]:
+                open_over(); over_depth += 1
 
-    # Safety close (should be empty)
+    # Safety close
     for wid in list(active_win_ids)[::-1]:
         close_win(wid)
-    while uniq_depth > 0:
-        close_uniq()
+    # close any leftover overlay spans
+    while uniq_depth > 0: close_uniq(); uniq_depth -= 1
+    while filler_depth > 0: close_filler(); filler_depth -= 1
+    while over_depth > 0: close_over(); over_depth -= 1
 
     return "".join(out)
 
-# ----------------- UI -----------------
-st.set_page_config(page_title="Semantic Overlap & Density (FastEmbed)", layout="wide")
-st.title("Semantic Overlap & Density — FastEmbed (no Torch)")
-st.caption("CPU-only ONNX embeddings with clear annotations: per-window colors, unique-word highlights, legend & summary.")
+# ----------------- Sentence chips & repetition meter -----------------
+def sentence_metrics(sent_text: str, queries: List[str], model_name: str) -> Dict[str, float]:
+    # Density proxy
+    gr = gzip_ratio(sent_text)
+    toks = tokenize(sent_text)
+    semuniq, tok_count, ctok_count, uniq_count = semantic_uniques_score(sent_text)
+    gzip_adj = gr / max(1e-9, math.log1p(tok_count))
+    gzip_norm = squash_01(gzip_adj)
+    semu_norm = squash_01(semuniq)
 
-# Add info section
-with st.expander("ℹ️ How to use this tool", expanded=False):
-    st.markdown("""
-    **This tool analyzes how well your content matches specific search queries using AI embeddings.**
-    
-    **How it works:**
-    1. **Enter your content** in the left text area
-    2. **Add search queries** in the right text area (one per line)
-    3. **Click 'Score Passage'** to analyze
-    4. **View results:**
-       - **Colored borders** show windows with high query relevance
-       - **Green bold text** highlights unique words (appear only once)
-       - **Score badges** show relevance scores and contributing queries
-       - **Metrics** provide overall content quality scores
-    
-    **Understanding the scores:**
-    - **Gzip (density)**: How compressible the text is (lower = more unique content)
-    - **Semantic Uniques**: Percentage of unique content words
-    - **Overlap (relevance)**: How well content matches your queries
-    - **Content Balance Score**: Overall quality combining all factors
-    
-    **Tips:**
-    - Use specific, relevant search terms for better matching
-    - Adjust window size and stride to fine-tune analysis granularity
-    - Higher border threshold shows only the most relevant sections
-    """)
+    # Overlap per sentence using the same embedder (sentence vs queries max)
+    ov = 0.0
+    if queries:
+        vecs = embed_fastembed(queries + [sent_text], model_name=model_name)
+        qv, sv = vecs[:-1], vecs[-1:]
+        sims = (qv @ sv.T).flatten()
+        if sims.size:
+            ov = float(np.mean(sims))  # avg over queries
+        # length-normalize lightly for very short sents
+        length_factor = min(1.0, math.log1p(len(toks)) / math.log1p(20.0))
+        ov = max(0.0, min(1.0, ov * length_factor))
+
+    return {"density": gzip_norm, "uniques": semu_norm, "overlap": ov}
+
+def top_ngrams(text: str, n: int = 10) -> Dict[str, int]:
+    toks = [t for t in tokenize(text) if len(t) >= 3]
+    unis = Counter(toks)
+    bigrams = Counter([" ".join(pair) for pair in zip(toks, toks[1:])])
+    # mix
+    combined = unis.most_common(n) + bigrams.most_common(n)
+    # de-dupe keeping max count
+    agg = {}
+    for k, v in combined:
+        agg[k] = max(v, agg.get(k, 0))
+    # sort by count desc
+    return dict(sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:n])
+
+SYNONYM_HINTS = {
+    "very": ["extremely", "highly", "especially"],
+    "really": ["truly", "genuinely"],
+    "just": ["simply", "only"],
+    "luxury": ["high-end", "upscale", "premium"],
+    "spa": ["wellness", "therapies", "treatments"],
+    "hotel": ["property", "retreat", "stay"],
+}
+
+def synonym_nudges(terms: List[str]) -> Dict[str, List[str]]:
+    hints = {}
+    for t in terms:
+        base = t.lower()
+        if base in SYNONYM_HINTS:
+            hints[t] = SYNONYM_HINTS[base]
+        elif len(base) > 6:
+            # simple suffix-based nudge
+            hints[t] = [base.rstrip("s"), base + "s"]
+    return hints
+
+# ----------------- UI -----------------
+st.set_page_config(page_title="Semantic Overlap & Density (Editor Mode)", layout="wide")
+st.title("Semantic Overlap & Density — Editor Mode (FastEmbed)")
+
+# ---------- Persistent sidebar toggles ----------
+def init_state(key, default):
+    if key not in st.session_state:
+        st.session_state[key] = default
+    return st.session_state[key]
 
 with st.sidebar:
     st.markdown("### Configuration")
-    
     model_name = st.selectbox(
-        "Embedding Model",
+        "Embedding model",
         ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"],
-        index=0,
-        help="Choose the AI model for semantic analysis. BAAI/bge-small-en-v1.5 is faster and more accurate for English text."
+        index=init_state("model_idx", 0)
     )
-    
-    st.markdown("### Window Settings")
-    
-    win_size = st.slider(
-        "Sentence Window Size", 
-        1, 6, 3,
-        help="Number of sentences grouped together for analysis. Larger windows capture more context but may miss fine details."
-    )
-    
-    stride = st.slider(
-        "Window Stride", 
-        1, 6, 2,
-        help="How many sentences to skip between windows. Smaller stride = more overlap, larger stride = less overlap."
-    )
-    
-    st.markdown("### Display Settings")
-    
-    border_thresh = st.slider(
-        "Window Border Threshold", 
-        0.0, 1.0, float(MIN_WINDOW_BORDER_SCORE), 0.05,
-        help="Only show colored borders for windows with scores above this threshold. Score badges always show regardless."
-    )
-    MIN_WINDOW_BORDER_SCORE = border_thresh  # reflect live
+    st.session_state["model_idx"] = ["BAAI/bge-small-en-v1.5", "intfloat/e5-small-v2"].index(model_name)
 
+    st.markdown("### Windowing")
+    win_size = st.slider("Sentence window size", 1, 6, init_state("win_size", 3))
+    st.session_state["win_size"] = win_size
+    stride   = st.slider("Window stride", 1, 6, init_state("stride", 2))
+    st.session_state["stride"] = stride
+
+    border_thresh = st.slider("Window border threshold", 0.0, 1.0, init_state("border_thresh", float(MIN_WINDOW_BORDER_SCORE)), 0.05)
+    st.session_state["border_thresh"] = border_thresh
+    MIN_WINDOW_BORDER_SCORE = border_thresh
+
+    st.markdown("### Overlays (toggle)")
+    show_stripes = st.checkbox("Per-query coverage stripes", value=init_state("show_stripes", True))
+    st.session_state["show_stripes"] = show_stripes
+    show_sentence_chips = st.checkbox("Sentence chips with deltas", value=init_state("show_sentence_chips", True))
+    st.session_state["show_sentence_chips"] = show_sentence_chips
+    show_filler = st.checkbox("Highlight filler / hedging", value=init_state("show_filler", True))
+    st.session_state["show_filler"] = show_filler
+    overstuff_limit = st.number_input("Over-stuffing threshold (exact query repeats)", 0, 10, init_state("overstuff_limit", 2))
+    st.session_state["overstuff_limit"] = overstuff_limit
+
+    st.markdown("### Editor helpers")
+    if st.button("Trim filler words"):
+        st.session_state["apply_trim_filler"] = True
+    if st.button("Collapse repeated spaces"):
+        st.session_state["apply_collapse_spaces"] = True
+
+# Inputs
 colA, colB = st.columns([1,1])
 with colA:
-    passage = st.text_area("Passage", height=230, placeholder="Paste your content here…")
+    default_passage = st.session_state.get("passage_text", "")
+    passage = st.text_area("Passage", height=260, value=default_passage, placeholder="Paste your content here…")
 with colB:
-    raw_queries = st.text_area(
-        "Queries (one per line, up to 10)",
-        height=230,
-        placeholder="e.g.\nluxury resort whistler\nski-in ski-out suites\nspa and wellness"
-    )
-    queries = [q.strip() for q in raw_queries.splitlines() if q.strip()][:10]
+    default_queries = st.session_state.get("queries_text", "")
+    raw_queries = st.text_area("Queries (one per line, up to 10)", height=260, value=default_queries,
+                               placeholder="e.g.\nluxury resort whistler\nski-in ski-out suites\nspa and wellness")
+    queries = [q.strip() for q in raw_queries.splitlines() if q.strip()][:MAX_QUERIES]
+
+# Apply one-click editor helpers (persistent)
+if st.session_state.get("apply_trim_filler"):
+    passage = re.sub(FILLER_WORDS, "", passage)
+    passage = re.sub(r"\s{2,}", " ", passage).strip()
+    st.session_state["apply_trim_filler"] = False
+if st.session_state.get("apply_collapse_spaces"):
+    passage = re.sub(r"\s{2,}", " ", passage)
+    st.session_state["apply_collapse_spaces"] = False
+
+# Save back to state so the text persists after rerun
+st.session_state["passage_text"] = passage
+st.session_state["queries_text"] = raw_queries
 
 if st.button("Score Passage"):
     if not passage.strip():
@@ -345,60 +481,42 @@ if st.button("Score Passage"):
         gzip_adj  = gr / max(1e-9, math.log1p(tok_count))
         gzip_norm = squash_01(gzip_adj)
         semu_norm = squash_01(semuniq)
-        ov_len, win_scores, sims, q_labels, w_labels = overlap_embed(
+        ov_len, win_scores, sims, q_labels, w_labels, wins = overlap_embed(
             passage, queries, model_name=model_name, win_size=win_size, stride=stride
         )
         final = geometric_mean([gzip_norm, semu_norm, ov_len])
 
-    # Metrics
-    st.markdown("### Content Analysis Results")
+    # --- Metrics ---
     m1, m2, m3, m4 = st.columns(4)
-    
-    with m1:
-        st.metric(
-            "Gzip Density", 
-            f"{gzip_norm:.2f}",
-            help="How compressible the text is. Lower values indicate more unique, diverse content."
-        )
-    
-    with m2:
-        st.metric(
-            "Semantic Uniques", 
-            f"{semu_norm:.2f}",
-            help="Percentage of unique content words. Higher values indicate more diverse vocabulary."
-        )
-    
-    with m3:
-        st.metric(
-            "Query Relevance", 
-            f"{ov_len:.2f}",
-            help="How well the content matches your search queries. Higher values indicate better semantic alignment."
-        )
-    
-    with m4:
-        st.metric(
-            "Overall Quality", 
-            f"{final:.2f}",
-            help="Combined score balancing density, uniqueness, and query relevance. Higher is better."
-        )
+    m1.metric("Gzip (density, norm)", f"{gzip_norm:.2f}")
+    m2.metric("Semantic Uniques (norm)", f"{semun_norm:.2f}")
+    m3.metric("Overlap (relevance)",    f"{ov_len:.2f}")
+    m4.metric("Content Balance Score",  f"{final:.2f}")
 
     if tok_count < 25:
         st.info("Very short passages (< 25 tokens) can be unstable.")
 
     st.markdown("---")
-    st.subheader("Annotated Passage")
-    st.markdown(
-        "<div style='line-height:1.8; font-size:1.05rem;'>"
-        + render_highlighted(passage, win_scores)
-        + "</div>",
-        unsafe_allow_html=True
-    )
 
-    # ---- Legend & written summary ----
+    # --- Annotated passage ---
+    st.subheader("Annotated Passage")
+    html_block = render_passage(
+        passage=passage,
+        window_scores=win_scores,
+        wins=wins,
+        sims=sims,
+        queries=queries,
+        show_per_query_stripes=show_stripes,
+        show_filler_flags=show_filler,
+        overstuff_threshold=int(overstuff_limit)
+    )
+    st.markdown("<div style='line-height:1.8; font-size:1.05rem;'>"+html_block+"</div>", unsafe_allow_html=True)
+
+    # Legend + Query key
     st.markdown("### Legend")
     legend_cols = st.columns(min(4, max(1, len(win_scores))))
     for i, ws in enumerate(win_scores):
-        _, _, score, contrib, render_flag = ws
+        _, _, score, contrib, _ = ws
         color = WINDOW_PALETTE[i % len(WINDOW_PALETTE)]
         with legend_cols[i % len(legend_cols)]:
             st.markdown(
@@ -407,10 +525,63 @@ if st.button("Score Passage"):
                 f"<span><b>W{i+1}</b> (score {score:.2f})</span>",
                 unsafe_allow_html=True
             )
-
     st.markdown("### Query Key")
-    st.markdown(", ".join([f"**Q{i+1}**: {q}" for i, q in enumerate(queries)]) or "_No queries_")
+    st.markdown(", ".join([f"**Q{i+1}**: <span style='color:{QUERY_PALETTE[i%len(QUERY_PALETTE)]}'>{html.escape(q)}</span>"
+                           for i, q in enumerate(queries)]) , unsafe_allow_html=True)
 
+    # --- Sentence chips with deltas ---
+    if show_sentence_chips:
+        st.markdown("### Sentence Chips (Δ vs previous run)")
+        sents = split_sents(passage)
+        chips = []
+        for (s, e, txt) in sents:
+            m = sentence_metrics(txt, queries, model_name=model_name)
+            chips.append((txt, m))
+        # compute deltas vs last run (by hashing sentence text)
+        prev = st.session_state.get("prev_sentence_scores", {})
+        curr = {}
+        for txt, m in chips:
+            key = hashlib.md5(txt.encode("utf-8")).hexdigest()
+            curr[key] = m
+            d = prev.get(key, None)
+            def fmt(val): return f"{val:.2f}"
+            def delta(curr, prev): 
+                return f"{(curr - prev):+0.02f}" if prev is not None else "—"
+            density = fmt(m["density"]); d_d = delta(m["density"], d["density"]) if d else "—"
+            uniq    = fmt(m["uniques"]); d_u = delta(m["uniques"], d["uniques"]) if d else "—"
+            ov      = fmt(m["overlap"]); d_o = delta(m["overlap"], d["overlap"]) if d else "—"
+            st.markdown(
+                f"<div style='margin:4px 0; padding:6px 8px; border:1px solid #eee; border-radius:6px;'>"
+                f"<div style='font-size:0.95rem; margin-bottom:4px'>{html.escape(txt)}</div>"
+                f"<div style='font-size:0.85rem; color:#444'>"
+                f"Overlap <b>{ov}</b> (<span style='color:#666'>{d_o}</span>) • "
+                f"Uniques <b>{uniq}</b> (<span style='color:#666'>{d_u}</span>) • "
+                f"Density <b>{density}</b> (<span style='color:#666'>{d_d}</span>)"
+                f"</div></div>",
+                unsafe_allow_html=True
+            )
+        st.session_state["prev_sentence_scores"] = curr
+
+    # --- Repetition meter + synonym nudges ---
+    st.markdown("### Repetition Meter & Synonym Nudges")
+    reps = top_ngrams(passage, n=10)
+    if reps:
+        cols = st.columns(2)
+        with cols[0]:
+            st.write({k: reps[k] for k in list(reps.keys())[:10]})
+        with cols[1]:
+            # suggest synonyms for top repeated unigrams only
+            unigram_terms = [k for k in reps.keys() if " " not in k][:5]
+            hints = synonym_nudges(unigram_terms)
+            if hints:
+                for term, alt in hints.items():
+                    st.write(f"**{term}** → " + ", ".join(alt))
+            else:
+                st.write("No synonym nudges found for top terms.")
+    else:
+        st.write("No repeated terms found.")
+
+    # --- Window Summary ---
     st.markdown("### Window Summary")
     for i, ws in enumerate(win_scores):
         start, end, score, contrib, render_flag = ws
