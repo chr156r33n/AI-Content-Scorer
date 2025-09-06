@@ -54,24 +54,25 @@ def extract_semantic_triplets(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
                 obj = token
         
         if subject and obj:
-            # Create predicate span: start with root token
+            # Create predicate span: start with root token only
             p_span = sent.doc[root.i : root.i+1]
             
-            # Find auxiliary verbs that are children of the root
+            # Find auxiliary verbs that are direct children of the root
             aux_tokens = []
             for token in sent:
                 if (token.dep_ in ["aux", "auxpass"] and 
                     token.head == root and 
-                    token.pos_ in ["VERB", "AUX"]):
+                    token.pos_ in ["AUX"] and  # Only AUX, not VERB
+                    token.i < root.i):  # Only auxiliaries that come before the root
                     aux_tokens.append(token)
             
-            # Extend span to include auxiliaries
-            if aux_tokens:
+            # Extend span to include auxiliaries (only if they exist and are reasonable)
+            if aux_tokens and len(aux_tokens) <= 3:  # Limit to max 3 auxiliaries
                 # Sort auxiliaries by position
                 aux_tokens.sort(key=lambda t: t.i)
-                # Create extended span from first auxiliary to last token
+                # Create extended span from first auxiliary to root
                 start_idx = min(token.i for token in aux_tokens + [root])
-                end_idx = max(token.i for token in aux_tokens + [root]) + 1
+                end_idx = root.i + 1  # Only go up to the root, not beyond
                 p_span = sent.doc[start_idx : end_idx]
             
             triplets.append({
