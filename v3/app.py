@@ -54,12 +54,31 @@ def extract_semantic_triplets(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
                 obj = token
         
         if subject and obj:
-            triplets.append({
-                'subject': {'text': subject.text, 'start': subject.idx, 'end': subject.idx + len(subject.text)},
-                'predicate': {'text': root.text, 'start': root.idx, 'end': root.idx + len(root.text)},
-                'object': {'text': obj.text, 'start': obj.idx, 'end': obj.idx + len(obj.text)},
-                'sentence': sent.text
-            })
+            # Create predicate span: root + auxiliaries
+            predicate_tokens = [root]
+            
+            # Find auxiliary verbs that are children of the root
+            for token in sent:
+                if (token.dep_ in ["aux", "auxpass"] and 
+                    token.head == root and 
+                    token.pos_ in ["VERB", "AUX"]):
+                    predicate_tokens.append(token)
+            
+            # Sort tokens by their position in the sentence
+            predicate_tokens.sort(key=lambda t: t.i)
+            
+            # Create predicate span
+            if predicate_tokens:
+                start_pos = min(token.idx for token in predicate_tokens)
+                end_pos = max(token.idx + len(token.text) for token in predicate_tokens)
+                predicate_text = " ".join(token.text for token in predicate_tokens)
+                
+                triplets.append({
+                    'subject': {'text': subject.text, 'start': subject.idx, 'end': subject.idx + len(subject.text)},
+                    'predicate': {'text': predicate_text, 'start': start_pos, 'end': end_pos},
+                    'object': {'text': obj.text, 'start': obj.idx, 'end': obj.idx + len(obj.text)},
+                    'sentence': sent.text
+                })
     
     return triplets
 
