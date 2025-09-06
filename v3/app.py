@@ -54,31 +54,32 @@ def extract_semantic_triplets(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
                 obj = token
         
         if subject and obj:
-            # Create predicate span: root + auxiliaries
-            predicate_tokens = [root]
+            # Create predicate span: start with root token
+            p_span = sent.doc[root.i : root.i+1]
             
             # Find auxiliary verbs that are children of the root
+            aux_tokens = []
             for token in sent:
                 if (token.dep_ in ["aux", "auxpass"] and 
                     token.head == root and 
                     token.pos_ in ["VERB", "AUX"]):
-                    predicate_tokens.append(token)
+                    aux_tokens.append(token)
             
-            # Sort tokens by their position in the sentence
-            predicate_tokens.sort(key=lambda t: t.i)
+            # Extend span to include auxiliaries
+            if aux_tokens:
+                # Sort auxiliaries by position
+                aux_tokens.sort(key=lambda t: t.i)
+                # Create extended span from first auxiliary to last token
+                start_idx = min(token.i for token in aux_tokens + [root])
+                end_idx = max(token.i for token in aux_tokens + [root]) + 1
+                p_span = sent.doc[start_idx : end_idx]
             
-            # Create predicate span
-            if predicate_tokens:
-                start_pos = min(token.idx for token in predicate_tokens)
-                end_pos = max(token.idx + len(token.text) for token in predicate_tokens)
-                predicate_text = " ".join(token.text for token in predicate_tokens)
-                
-                triplets.append({
-                    'subject': {'text': subject.text, 'start': subject.idx, 'end': subject.idx + len(subject.text)},
-                    'predicate': {'text': predicate_text, 'start': start_pos, 'end': end_pos},
-                    'object': {'text': obj.text, 'start': obj.idx, 'end': obj.idx + len(obj.text)},
-                    'sentence': sent.text
-                })
+            triplets.append({
+                'subject': {'text': subject.text, 'start': subject.idx, 'end': subject.idx + len(subject.text)},
+                'predicate': {'text': p_span.text, 'start': p_span.start_char, 'end': p_span.end_char},
+                'object': {'text': obj.text, 'start': obj.idx, 'end': obj.idx + len(obj.text)},
+                'sentence': sent.text
+            })
     
     return triplets
 
