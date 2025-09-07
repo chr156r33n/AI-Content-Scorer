@@ -37,7 +37,7 @@ def get_noun_chunks(doc: spacy.tokens.Doc) -> List[spacy.tokens.Span]:
     return list(doc.noun_chunks)
 
 def find_subject_object_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
-    """Find subject and object spans using noun chunks."""
+    """Find subject and object spans using noun chunks and individual tokens."""
     spans = []
     noun_chunks = get_noun_chunks(doc)
     
@@ -47,46 +47,119 @@ def find_subject_object_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
         if root.pos_ != "VERB":
             continue
             
-        # Find subject and object noun chunks
-        subject_chunk = None
-        object_chunk = None
+        # Find subject and object spans
+        subject_span = None
+        object_span = None
         
+        # First try noun chunks
         for chunk in noun_chunks:
             if chunk.sent == sent:  # Only consider chunks in this sentence
                 # Check if any token in the chunk is a subject of the root
                 for token in chunk:
                     if token.dep_ in ["nsubj", "nsubjpass"] and token.head == root:
-                        subject_chunk = chunk
+                        subject_span = {
+                            "start": chunk.start_char,
+                            "end": chunk.end_char,
+                            "text": chunk.text
+                        }
                         break
                 
                 # Check if any token in the chunk is an object of the root
-                if not object_chunk:  # Only find first object
+                if not object_span:  # Only find first object
                     for token in chunk:
                         # Check for direct objects
                         if token.dep_ in ["dobj", "attr", "obj"] and token.head == root:
-                            object_chunk = chunk
+                            object_span = {
+                                "start": chunk.start_char,
+                                "end": chunk.end_char,
+                                "text": chunk.text
+                            }
                             break
                         # Check for prepositional objects (objects of prepositions that are children of the root)
                         elif token.dep_ == "pobj" and token.head.head == root:
-                            object_chunk = chunk
+                            object_span = {
+                                "start": chunk.start_char,
+                                "end": chunk.end_char,
+                                "text": chunk.text
+                            }
                             break
         
+        # If no object found in noun chunks, try individual tokens
+        if not object_span:
+            for token in sent:
+                # Check for direct objects
+                if token.dep_ in ["dobj", "attr", "obj"] and token.head == root:
+                    # Try to find the full noun phrase including determiners
+                    start_token = token
+                    end_token = token
+                    
+                    # Look backwards for determiners, adjectives
+                    for i in range(token.i - 1, sent.start - 1, -1):
+                        prev_token = doc[i]
+                        if prev_token.pos_ in ["DET", "ADJ", "NUM"] and prev_token.head == token:
+                            start_token = prev_token
+                        else:
+                            break
+                    
+                    # Look forwards for adjectives, nouns
+                    for i in range(token.i + 1, sent.end):
+                        next_token = doc[i]
+                        if next_token.pos_ in ["ADJ", "NOUN", "PROPN"] and next_token.head == token:
+                            end_token = next_token
+                        else:
+                            break
+                    
+                    object_span = {
+                        "start": start_token.idx,
+                        "end": end_token.idx + len(end_token.text),
+                        "text": doc[start_token.idx:end_token.idx + len(end_token.text)].text
+                    }
+                    break
+                # Check for prepositional objects
+                elif token.dep_ == "pobj" and token.head.head == root:
+                    # Similar logic for prepositional objects
+                    start_token = token
+                    end_token = token
+                    
+                    # Look backwards for determiners, adjectives
+                    for i in range(token.i - 1, sent.start - 1, -1):
+                        prev_token = doc[i]
+                        if prev_token.pos_ in ["DET", "ADJ", "NUM"] and prev_token.head == token:
+                            start_token = prev_token
+                        else:
+                            break
+                    
+                    # Look forwards for adjectives, nouns
+                    for i in range(token.i + 1, sent.end):
+                        next_token = doc[i]
+                        if next_token.pos_ in ["ADJ", "NOUN", "PROPN"] and next_token.head == token:
+                            end_token = next_token
+                        else:
+                            break
+                    
+                    object_span = {
+                        "start": start_token.idx,
+                        "end": end_token.idx + len(end_token.text),
+                        "text": doc[start_token.idx:end_token.idx + len(end_token.text)].text
+                    }
+                    break
+        
         # Add subject span
-        if subject_chunk:
+        if subject_span:
             spans.append({
                 "label": "Subject",
-                "start": subject_chunk.start_char,
-                "end": subject_chunk.end_char,
-                "text": subject_chunk.text
+                "start": subject_span["start"],
+                "end": subject_span["end"],
+                "text": subject_span["text"]
             })
         
         # Add object span
-        if object_chunk:
+        if object_span:
             spans.append({
                 "label": "Object", 
-                "start": object_chunk.start_char,
-                "end": object_chunk.end_char,
-                "text": object_chunk.text
+                "start": object_span["start"],
+                "end": object_span["end"],
+                "text": object_span["text"]
             })
     
     return spans
