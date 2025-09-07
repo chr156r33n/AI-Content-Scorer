@@ -136,13 +136,29 @@ def find_predicate_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
     
     return spans
 
-def find_hedging_spans(text: str) -> List[Dict[str, Any]]:
-    """Find hedging language spans."""
+def find_hedging_spans(text: str, doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
+    """Find hedging language spans, excluding auxiliary verbs."""
     spans = []
     text_lower = text.lower()
     
+    # Get all auxiliary verbs that are part of predicates
+    aux_verbs_in_predicates = set()
+    for sent in doc.sents:
+        root = sent.root
+        if root.pos_ == "VERB":
+            for token in sent:
+                if (token.dep_ in ["aux", "auxpass"] and 
+                    token.head == root and 
+                    token.pos_ == "AUX"):
+                    aux_verbs_in_predicates.add(token.text.lower())
+    
     for term in HEDGING_TERMS:
         term_lower = term.lower()
+        
+        # Skip if this term is an auxiliary verb in a predicate
+        if term_lower in aux_verbs_in_predicates:
+            continue
+            
         # Use word boundaries to match whole words only
         pattern = r'\b' + re.escape(term_lower) + r'\b'
         
@@ -282,7 +298,7 @@ def annotate_passage(text: str) -> List[Dict[str, Any]]:
             print(f"Predicate detection failed: {e}")
         
         try:
-            all_spans.extend(find_hedging_spans(text))
+            all_spans.extend(find_hedging_spans(text, doc))
         except Exception as e:
             print(f"Hedging detection failed: {e}")
         
