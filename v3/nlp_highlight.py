@@ -7,9 +7,6 @@ import spacy
 import re
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
 
 # Load spaCy model
 try:
@@ -160,7 +157,7 @@ def find_hedging_spans(text: str) -> List[Dict[str, Any]]:
     return spans
 
 def find_topic_drift_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
-    """Find topic drift spans using TF-IDF similarity."""
+    """Find topic drift spans using simple word overlap similarity."""
     spans = []
     
     if len(list(doc.sents)) < 2:
@@ -174,35 +171,28 @@ def find_topic_drift_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
         return spans
     
     try:
-        # Create TF-IDF vectors with error handling
-        vectorizer = TfidfVectorizer(
-            ngram_range=(1, 2), 
-            stop_words='english', 
-            max_features=1000,
-            min_df=1,  # Ensure we don't get empty matrices
-            dtype=np.float64  # Explicitly set dtype
-        )
+        # Simple word-based similarity instead of TF-IDF
+        def get_word_set(text):
+            # Simple word tokenization
+            words = set(text.lower().split())
+            # Remove very short words
+            return {w for w in words if len(w) > 2}
         
-        # Fit on all sentences + full text
-        all_texts = sentences + [full_text]
-        tfidf_matrix = vectorizer.fit_transform(all_texts)
-        
-        # Check if we have a valid matrix
-        if tfidf_matrix.shape[0] == 0 or tfidf_matrix.shape[1] == 0:
-            return spans
-        
-        # L2 normalize
-        norms = np.linalg.norm(tfidf_matrix.toarray(), axis=1, keepdims=True) + 1e-12
-        tfidf_matrix = tfidf_matrix / norms
-        
-        # Get full text vector (last one)
-        full_text_vector = tfidf_matrix[-1:]
+        full_text_words = get_word_set(full_text)
         
         # Compare each sentence to full text
-        for i, sent in enumerate(doc.sents):
-            if i < len(sentences) and i < tfidf_matrix.shape[0] - 1:
-                sentence_vector = tfidf_matrix[i:i+1]
-                similarity = cosine_similarity(sentence_vector, full_text_vector)[0][0]
+        for sent in doc.sents:
+            sentence_words = get_word_set(sent.text)
+            
+            if len(sentence_words) == 0:
+                continue
+                
+            # Calculate Jaccard similarity
+            intersection = len(sentence_words & full_text_words)
+            union = len(sentence_words | full_text_words)
+            
+            if union > 0:
+                similarity = intersection / union
                 
                 if similarity < 0.15:
                     spans.append({
@@ -213,7 +203,7 @@ def find_topic_drift_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
                     })
     
     except Exception as e:
-        # If TF-IDF fails, skip topic drift detection
+        # If topic drift detection fails, skip it
         print(f"Topic drift detection failed: {e}")
         return spans
     
