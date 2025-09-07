@@ -1,0 +1,36 @@
+/* NLP Highlighting Styles */
+.hl-Subject {
+    background: #22c55e33;
+    border-radius: 2px;
+    padding: 1px 2px;
+}
+
+.hl-Predicate {
+    background: #06b6d433;
+    border-radius: 2px;
+    padding: 1px 2px;
+}
+
+.hl-Object {
+    background: #a855f733;
+    border-radius: 2px;
+    padding: 1px 2px;
+}
+
+.hl-Hedging {
+    background: #f59e0b33;
+    border-radius: 2px;
+    padding: 1px 2px;
+}
+
+.hl-TopicDrift {
+    background: #3b82f633;
+    border-radius: 2px;
+    padding: 1px 2px;
+}
+
+.hl-TooLong {
+    background: #ef444433;
+    border-radius: 2px;
+    padding: 1px 2px;
+}

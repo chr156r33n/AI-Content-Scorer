@@ -1,14 +1,10 @@
 import streamlit as st
-import spacy
-import re
 import pandas as pd
 import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from collections import defaultdict
 import textstat
 from typing import List, Dict, Tuple, Any
 import json
+from nlp_highlight import annotate_passage, render_html
 
 # Page configuration
 st.set_page_config(
@@ -18,199 +14,33 @@ st.set_page_config(
 )
 
 # Initialize session state
-if 'nlp' not in st.session_state:
-    st.session_state.nlp = None
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = None
 
-@st.cache_resource
-def load_spacy_model():
-    """Load spaCy model with caching"""
+def analyze_text(text: str) -> Dict[str, Any]:
+    """Analyze text using the new NLP highlighting module."""
     try:
-        nlp = spacy.load("en_core_web_sm")
-        return nlp
-    except OSError:
-        st.error("spaCy English model not found. Please install it with: python -m spacy download en_core_web_sm")
-        return None
-
-def extract_semantic_triplets(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
-    """Extract subject-predicate-object triplets from spaCy document"""
-    triplets = []
-    
-    for sent in doc.sents:
-        # Find the root verb
-        root = sent.root
-        if root.pos_ != "VERB":
-            continue
-            
-        # Find subject and object
-        subject = None
-        obj = None
+        # Get spans from the NLP module
+        spans = annotate_passage(text)
         
-        for token in sent:
-            if token.dep_ in ["nsubj", "nsubjpass"] and token.head == root:
-                subject = token
-            elif token.dep_ in ["dobj", "pobj", "attr", "obj"] and token.head == root:
-                obj = token
-        
-        if subject and obj:
-            # Create predicate span: start with root token only
-            p_span = sent.doc[root.i : root.i+1]
-            
-            # Find auxiliary verbs that are direct children of the root
-            aux_tokens = []
-            for token in sent:
-                if (token.dep_ in ["aux", "auxpass"] and 
-                    token.head == root and 
-                    token.pos_ in ["AUX"] and  # Only AUX, not VERB
-                    token.i < root.i):  # Only auxiliaries that come before the root
-                    aux_tokens.append(token)
-            
-            # Extend span to include auxiliaries (only if they exist and are reasonable)
-            if aux_tokens and len(aux_tokens) <= 3:  # Limit to max 3 auxiliaries
-                # Sort auxiliaries by position
-                aux_tokens.sort(key=lambda t: t.i)
-                # Create extended span from first auxiliary to root
-                start_idx = min(token.i for token in aux_tokens + [root])
-                end_idx = root.i + 1  # Only go up to the root, not beyond
-                p_span = sent.doc[start_idx : end_idx]
-            
-            triplets.append({
-                'subject': {'text': subject.text, 'start': subject.idx, 'end': subject.idx + len(subject.text)},
-                'predicate': {'text': p_span.text, 'start': p_span.start_char, 'end': p_span.end_char},
-                'object': {'text': obj.text, 'start': obj.idx, 'end': obj.idx + len(obj.text)},
-                'sentence': sent.text
-            })
-    
-    return triplets
-
-def detect_hedging(text: str, hedge_terms: List[str]) -> List[Dict[str, Any]]:
-    """Detect hedging language in text"""
-    hedging_spans = []
-    text_lower = text.lower()
-    
-    for term in hedge_terms:
-        term_lower = term.lower()
-        start = 0
-        while True:
-            pos = text_lower.find(term_lower, start)
-            if pos == -1:
-                break
-            hedging_spans.append({
-                'text': text[pos:pos + len(term)],
-                'start': pos,
-                'end': pos + len(term),
-                'term': term
-            })
-            start = pos + 1
-    
-    return hedging_spans
-
-def detect_topic_drift(sentences: List[str], threshold: float = 0.3) -> List[Dict[str, Any]]:
-    """Detect topic drift between sentences using TF-IDF"""
-    if len(sentences) < 2:
-        return []
-    
-    # Create TF-IDF vectors
-    vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words='english', max_features=1000)
-    tfidf_matrix = vectorizer.fit_transform(sentences)
-    
-    # Calculate cosine similarity between consecutive sentences
-    drift_sentences = []
-    for i in range(1, len(sentences)):
-        similarity = cosine_similarity(tfidf_matrix[i-1:i], tfidf_matrix[i:i+1])[0][0]
-        if similarity < threshold:
-            drift_sentences.append({
-                'sentence_index': i,
-                'sentence': sentences[i],
-                'similarity': similarity
-            })
-    
-    return drift_sentences
-
-def detect_overlong_passages(text: str, sentence_threshold: int = 35, paragraph_threshold: int = 180) -> List[Dict[str, Any]]:
-    """Detect overlong sentences and paragraphs"""
-    overlong_spans = []
-    
-    # Split into paragraphs
-    paragraphs = text.split('\n\n')
-    current_pos = 0
-    
-    for para_idx, paragraph in enumerate(paragraphs):
-        if not paragraph.strip():
-            current_pos += len(paragraph) + 2
-            continue
-            
-        # Check paragraph length
-        word_count = len(paragraph.split())
-        if word_count > paragraph_threshold:
-            overlong_spans.append({
-                'type': 'paragraph',
-                'text': paragraph,
-                'start': current_pos,
-                'end': current_pos + len(paragraph),
-                'word_count': word_count
-            })
-        
-        # Check sentence lengths within paragraph
-        sentences = re.split(r'[.!?]+', paragraph)
-        sentence_start = current_pos
-        
-        for sentence in sentences:
-            if not sentence.strip():
-                continue
-            word_count = len(sentence.split())
-            if word_count > sentence_threshold:
-                overlong_spans.append({
-                    'type': 'sentence',
-                    'text': sentence.strip(),
-                    'start': sentence_start,
-                    'end': sentence_start + len(sentence),
-                    'word_count': word_count
-                })
-            sentence_start += len(sentence) + 1
-        
-        current_pos += len(paragraph) + 2
-    
-    return overlong_spans
-
-def highlight_text(text: str, highlights: Dict[str, List[Dict]]) -> str:
-    """Create HTML with highlighted text"""
-    # Sort all highlights by start position
-    all_highlights = []
-    for color, spans in highlights.items():
+        # Count different types of spans
+        span_counts = {}
         for span in spans:
-            all_highlights.append((span['start'], span['end'], color, span.get('text', '')))
-    
-    all_highlights.sort(key=lambda x: x[0])
-    
-    # Build highlighted HTML
-    result = ""
-    last_end = 0
-    
-    for start, end, color, span_text in all_highlights:
-        # Add text before highlight
-        if start > last_end:
-            result += text[last_end:start]
+            label = span["label"]
+            span_counts[label] = span_counts.get(label, 0) + 1
         
-        # Add highlighted text
-        color_map = {
-            'subject': 'background-color: #90EE90; color: #000;',  # Light green
-            'predicate': 'background-color: #00FFFF; color: #000;',  # Cyan
-            'object': 'background-color: #DDA0DD; color: #000;',  # Plum
-            'hedging': 'background-color: #FFD700; color: #000;',  # Gold
-            'drift': 'background-color: #87CEEB; color: #000;',  # Sky blue
-            'overlong': 'background-color: #FFB6C1; color: #000;'  # Light pink
+        # Generate HTML with highlighting
+        highlighted_html = render_html(text, spans)
+        
+        return {
+            'spans': spans,
+            'span_counts': span_counts,
+            'highlighted_html': highlighted_html,
+            'text': text
         }
-        
-        result += f'<span style="{color_map.get(color, "")}">{span_text}</span>'
-        last_end = end
-    
-    # Add remaining text
-    if last_end < len(text):
-        result += text[last_end:]
-    
-    return result
+    except Exception as e:
+        st.error(f"Error analyzing text: {str(e)}")
+        return None
 
 def calculate_readability_metrics(text: str) -> Dict[str, float]:
     """Calculate readability metrics using textstat"""
@@ -229,38 +59,41 @@ def main():
     st.title("📝 Text Analysis App")
     st.markdown("Analyze text for semantic triplets, hedging language, topic drift, and overlong passages.")
     
-    # Load spaCy model
-    if st.session_state.nlp is None:
-        with st.spinner("Loading spaCy model..."):
-            st.session_state.nlp = load_spacy_model()
-    
-    if st.session_state.nlp is None:
-        st.stop()
-    
-    # Sidebar for settings
-    st.sidebar.header("⚙️ Settings")
-    
-    # Hedging terms
-    st.sidebar.subheader("Hedging Terms")
-    default_hedge_terms = [
-        "might", "may", "could", "suggests", "possibly", "typically", 
-        "generally", "arguably", "reportedly", "allegedly", "apparently",
-        "seems", "appears", "likely", "probably", "perhaps", "maybe",
-        "tends to", "often", "usually", "sometimes", "frequently"
-    ]
-    
-    hedge_terms_text = st.sidebar.text_area(
-        "Edit hedging terms (one per line):",
-        value="\n".join(default_hedge_terms),
-        height=200
-    )
-    hedge_terms = [term.strip() for term in hedge_terms_text.split('\n') if term.strip()]
-    
-    # Thresholds
-    st.sidebar.subheader("Thresholds")
-    sentence_threshold = st.sidebar.slider("Sentence word threshold", 10, 100, 35)
-    paragraph_threshold = st.sidebar.slider("Paragraph word threshold", 50, 500, 180)
-    drift_threshold = st.sidebar.slider("Topic drift threshold", 0.1, 0.9, 0.3, 0.05)
+    # Add CSS styles
+    st.markdown("""
+    <style>
+    .hl-Subject {
+        background: #22c55e33;
+        border-radius: 2px;
+        padding: 1px 2px;
+    }
+    .hl-Predicate {
+        background: #06b6d433;
+        border-radius: 2px;
+        padding: 1px 2px;
+    }
+    .hl-Object {
+        background: #a855f733;
+        border-radius: 2px;
+        padding: 1px 2px;
+    }
+    .hl-Hedging {
+        background: #f59e0b33;
+        border-radius: 2px;
+        padding: 1px 2px;
+    }
+    .hl-TopicDrift {
+        background: #3b82f633;
+        border-radius: 2px;
+        padding: 1px 2px;
+    }
+    .hl-TooLong {
+        background: #ef444433;
+        border-radius: 2px;
+        padding: 1px 2px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     
     # Main content area
     col1, col2 = st.columns([2, 1])
@@ -276,25 +109,10 @@ def main():
         if st.button("🔍 Analyze Text", type="primary"):
             if text_input.strip():
                 with st.spinner("Analyzing text..."):
-                    # Process text with spaCy
-                    doc = st.session_state.nlp(text_input)
-                    
-                    # Extract features
-                    triplets = extract_semantic_triplets(doc)
-                    hedging = detect_hedging(text_input, hedge_terms)
-                    sentences = [sent.text for sent in doc.sents]
-                    drift = detect_topic_drift(sentences, drift_threshold)
-                    overlong = detect_overlong_passages(text_input, sentence_threshold, paragraph_threshold)
-                    
-                    # Store results
-                    st.session_state.analysis_results = {
-                        'triplets': triplets,
-                        'hedging': hedging,
-                        'drift': drift,
-                        'overlong': overlong,
-                        'text': text_input,
-                        'sentences': sentences
-                    }
+                    # Analyze text using new module
+                    results = analyze_text(text_input)
+                    if results:
+                        st.session_state.analysis_results = results
             else:
                 st.warning("Please enter some text to analyze.")
     
@@ -304,12 +122,13 @@ def main():
             results = st.session_state.analysis_results
             
             # Basic counts
-            st.metric("Sentences", len(results['sentences']))
-            st.metric("Paragraphs", len(text_input.split('\n\n')))
-            st.metric("Hedging instances", len(results['hedging']))
-            st.metric("S-P-O triplets", len(results['triplets']))
-            st.metric("Topic drift", len(results['drift']))
-            st.metric("Overlong spans", len(results['overlong']))
+            span_counts = results['span_counts']
+            st.metric("Subjects", span_counts.get('Subject', 0))
+            st.metric("Predicates", span_counts.get('Predicate', 0))
+            st.metric("Objects", span_counts.get('Object', 0))
+            st.metric("Hedging instances", span_counts.get('Hedging', 0))
+            st.metric("Topic drift", span_counts.get('TopicDrift', 0))
+            st.metric("Too long", span_counts.get('TooLong', 0))
             
             # Readability metrics
             readability = calculate_readability_metrics(text_input)
@@ -335,85 +154,39 @@ def main():
         
         results = st.session_state.analysis_results
         
-        # Prepare highlights
-        highlights = {
-            'subject': [t['subject'] for t in results['triplets']],
-            'predicate': [t['predicate'] for t in results['triplets']],
-            'object': [t['object'] for t in results['triplets']],
-            'hedging': results['hedging'],
-            'overlong': results['overlong']
-        }
-        
-        # Add drift highlights (approximate positions)
-        drift_highlights = []
-        for drift_item in results['drift']:
-            sentence_idx = drift_item['sentence_index']
-            if sentence_idx < len(results['sentences']):
-                sentence = results['sentences'][sentence_idx]
-                # Find approximate position in original text
-                pos = results['text'].find(sentence)
-                if pos != -1:
-                    drift_highlights.append({
-                        'start': pos,
-                        'end': pos + len(sentence),
-                        'text': sentence
-                    })
-        highlights['drift'] = drift_highlights
-        
-        # Create highlighted HTML
-        highlighted_html = highlight_text(results['text'], highlights)
-        
         # Display highlighted text
-        st.markdown(highlighted_html, unsafe_allow_html=True)
+        st.markdown(results['highlighted_html'], unsafe_allow_html=True)
         
         # Detailed results
         with st.expander("📋 Detailed Results"):
-            tab1, tab2, tab3, tab4 = st.tabs(["Triplets", "Hedging", "Drift", "Overlong"])
+            spans = results['spans']
             
-            with tab1:
-                if results['triplets']:
-                    for i, triplet in enumerate(results['triplets']):
-                        st.write(f"**Triplet {i+1}:**")
-                        st.write(f"- Subject: {triplet['subject']['text']}")
-                        st.write(f"- Predicate: {triplet['predicate']['text']}")
-                        st.write(f"- Object: {triplet['object']['text']}")
-                        st.write(f"- Sentence: {triplet['sentence']}")
-                        st.write("---")
-                else:
-                    st.write("No semantic triplets found.")
+            # Group spans by type
+            spans_by_type = {}
+            for span in spans:
+                label = span['label']
+                if label not in spans_by_type:
+                    spans_by_type[label] = []
+                spans_by_type[label].append(span)
             
-            with tab2:
-                if results['hedging']:
-                    for hedge in results['hedging']:
-                        st.write(f"**{hedge['term']}** at position {hedge['start']}")
-                else:
-                    st.write("No hedging language detected.")
-            
-            with tab3:
-                if results['drift']:
-                    for drift in results['drift']:
-                        st.write(f"**Sentence {drift['sentence_index']}:** (similarity: {drift['similarity']:.3f})")
-                        st.write(drift['sentence'])
-                        st.write("---")
-                else:
-                    st.write("No topic drift detected.")
-            
-            with tab4:
-                if results['overlong']:
-                    for overlong in results['overlong']:
-                        st.write(f"**{overlong['type'].title()}** ({overlong['word_count']} words)")
-                        st.write(overlong['text'])
-                        st.write("---")
-                else:
-                    st.write("No overlong passages detected.")
+            # Display each type
+            for label, type_spans in spans_by_type.items():
+                st.subheader(f"{label} Spans ({len(type_spans)})")
+                for i, span in enumerate(type_spans):
+                    start = span['start']
+                    end = span['end']
+                    text_snippet = results['text'][start:end]
+                    st.write(f"**{i+1}.** Position {start}-{end}: \"{text_snippet}\"")
     
     # Tips
     st.subheader("💡 Tips")
     st.markdown("""
-    - **Adjust thresholds** in the sidebar to fine-tune detection sensitivity
-    - **Edit hedging terms** to customize hedging language detection
-    - **Lower drift threshold** to catch more subtle topic changes
-    - **Increase word thresholds** to be more lenient with passage length
+    - **Subjects** are highlighted in green - these are the main noun phrases
+    - **Predicates** are highlighted in cyan - these are verb phrases with auxiliaries
+    - **Objects** are highlighted in purple - these are the target noun phrases
+    - **Hedging** terms are highlighted in amber - words that express uncertainty
+    - **Topic drift** sentences are highlighted in blue - sentences that don't fit the main topic
+    - **Too long** sentences are highlighted in red - sentences over 30 tokens or 140 characters
     """)
 
 if __name__ == "__main__":
