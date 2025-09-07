@@ -24,7 +24,8 @@ HEDGING_TERMS = {
 
 # Priority order for span de-overlapping (highest wins)
 PRIORITY_ORDER = {
-    "TooLong": 6,
+    "TooLong": 7,
+    "TooComplex": 6,
     "Hedging": 5, 
     "Subject": 4,
     "Object": 3,
@@ -305,6 +306,85 @@ def find_too_long_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
     
     return spans
 
+def find_too_complex_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
+    """Find sentences that are too complex based on multiple metrics."""
+    spans = []
+    
+    for sent in doc.sents:
+        complexity_score = 0
+        complexity_reasons = []
+        
+        # 1. Dependency depth (how many levels of nested phrases)
+        max_depth = 0
+        for token in sent:
+            depth = 0
+            current = token
+            while current.head != current:
+                depth += 1
+                current = current.head
+            max_depth = max(max_depth, depth)
+        
+        if max_depth > 6:  # More than 6 levels of nesting
+            complexity_score += 2
+            complexity_reasons.append(f"deep nesting ({max_depth} levels)")
+        
+        # 2. Number of clauses (main + subordinate)
+        clause_count = 0
+        for token in sent:
+            if token.dep_ in ["advcl", "acl", "relcl", "ccomp", "xcomp"]:
+                clause_count += 1
+        
+        if clause_count > 2:  # More than 2 subordinate clauses
+            complexity_score += 2
+            complexity_reasons.append(f"many clauses ({clause_count})")
+        
+        # 3. Prepositional phrase density
+        prep_count = sum(1 for token in sent if token.dep_ == "prep")
+        prep_density = prep_count / len(sent) if len(sent) > 0 else 0
+        
+        if prep_density > 0.15:  # More than 15% prepositions
+            complexity_score += 1
+            complexity_reasons.append(f"many prepositions ({prep_count})")
+        
+        # 4. Conjunction density
+        conj_count = sum(1 for token in sent if token.dep_ in ["cc", "conj"])
+        conj_density = conj_count / len(sent) if len(sent) > 0 else 0
+        
+        if conj_density > 0.1:  # More than 10% conjunctions
+            complexity_score += 1
+            complexity_reasons.append(f"many conjunctions ({conj_count})")
+        
+        # 5. Average words per clause
+        if clause_count > 0:
+            words_per_clause = len(sent) / (clause_count + 1)  # +1 for main clause
+            if words_per_clause > 12:  # More than 12 words per clause
+                complexity_score += 1
+                complexity_reasons.append(f"long clauses ({words_per_clause:.1f} words/clause)")
+        
+        # 6. Passive voice detection
+        passive_count = sum(1 for token in sent if token.dep_ == "auxpass")
+        if passive_count > 0:
+            complexity_score += 1
+            complexity_reasons.append("passive voice")
+        
+        # 7. Long sentence (already caught by TooLong, but add to complexity)
+        if len(sent) > 25:  # More than 25 tokens
+            complexity_score += 1
+            complexity_reasons.append(f"long sentence ({len(sent)} tokens)")
+        
+        # Flag as too complex if score >= 2 (lowered threshold)
+        if complexity_score >= 2:
+            spans.append({
+                "label": "TooComplex",
+                "start": sent.start_char,
+                "end": sent.end_char,
+                "text": sent.text,
+                "complexity_score": complexity_score,
+                "reasons": complexity_reasons
+            })
+    
+    return spans
+
 def deoverlap_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Remove overlapping spans, but allow semantic spans to coexist with TooLong spans."""
     if not spans:
@@ -327,11 +407,12 @@ def deoverlap_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     # Allow this overlap
                     continue
                 
-                # Allow semantic spans (Subject, Predicate, Object, Hedging) to coexist with TooLong
+                # Allow semantic spans (Subject, Predicate, Object, Hedging) to coexist with TooLong/TooComplex
                 semantic_spans = {"Subject", "Predicate", "Object", "Hedging"}
-                if ((span["label"] in semantic_spans and existing["label"] == "TooLong") or
-                    (span["label"] == "TooLong" and existing["label"] in semantic_spans)):
-                    # Allow this overlap - semantic analysis can coexist with length warnings
+                warning_spans = {"TooLong", "TooComplex"}
+                if ((span["label"] in semantic_spans and existing["label"] in warning_spans) or
+                    (span["label"] in warning_spans and existing["label"] in semantic_spans)):
+                    # Allow this overlap - semantic analysis can coexist with length/complexity warnings
                     continue
                 
                 # Normal overlap - use priority
@@ -346,7 +427,7 @@ def deoverlap_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def annotate_passage(text: str) -> List[Dict[str, Any]]:
     """
     Returns a list of spans:
-    [{ "label": "Subject|Predicate|Object|Hedging|TopicDrift|TooLong",
+    [{ "label": "Subject|Predicate|Object|Hedging|TopicDrift|TooLong|TooComplex",
        "start": int, "end": int, "text": str }]
     """
     if not text or not text.strip():
@@ -383,6 +464,11 @@ def annotate_passage(text: str) -> List[Dict[str, Any]]:
             all_spans.extend(find_too_long_spans(doc))
         except Exception as e:
             print(f"Too long detection failed: {e}")
+        
+        try:
+            all_spans.extend(find_too_complex_spans(doc))
+        except Exception as e:
+            print(f"Too complex detection failed: {e}")
         
         # Remove overlaps
         final_spans = deoverlap_spans(all_spans)
