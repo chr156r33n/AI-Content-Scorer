@@ -62,7 +62,12 @@ def find_subject_object_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
                 # Check if any token in the chunk is an object of the root
                 if not object_chunk:  # Only find first object
                     for token in chunk:
-                        if token.dep_ in ["dobj", "pobj", "attr", "obj"] and token.head == root:
+                        # Check for direct objects
+                        if token.dep_ in ["dobj", "attr", "obj"] and token.head == root:
+                            object_chunk = chunk
+                            break
+                        # Check for prepositional objects (objects of prepositions that are children of the root)
+                        elif token.dep_ == "pobj" and token.head.head == root:
                             object_chunk = chunk
                             break
         
