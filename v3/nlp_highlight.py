@@ -166,37 +166,56 @@ def find_topic_drift_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
     if len(list(doc.sents)) < 2:
         return spans
     
-    # Get sentences
-    sentences = [sent.text for sent in doc.sents]
-    full_text = doc.text
+    # Get sentences and filter out empty ones
+    sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+    full_text = doc.text.strip()
     
-    # Create TF-IDF vectors
-    vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words='english', max_features=1000)
+    if len(sentences) < 2 or not full_text:
+        return spans
     
-    # Fit on all sentences + full text
-    all_texts = sentences + [full_text]
-    tfidf_matrix = vectorizer.fit_transform(all_texts)
+    try:
+        # Create TF-IDF vectors with error handling
+        vectorizer = TfidfVectorizer(
+            ngram_range=(1, 2), 
+            stop_words='english', 
+            max_features=1000,
+            min_df=1,  # Ensure we don't get empty matrices
+            dtype=np.float64  # Explicitly set dtype
+        )
+        
+        # Fit on all sentences + full text
+        all_texts = sentences + [full_text]
+        tfidf_matrix = vectorizer.fit_transform(all_texts)
+        
+        # Check if we have a valid matrix
+        if tfidf_matrix.shape[0] == 0 or tfidf_matrix.shape[1] == 0:
+            return spans
+        
+        # L2 normalize
+        norms = np.linalg.norm(tfidf_matrix.toarray(), axis=1, keepdims=True) + 1e-12
+        tfidf_matrix = tfidf_matrix / norms
+        
+        # Get full text vector (last one)
+        full_text_vector = tfidf_matrix[-1:]
+        
+        # Compare each sentence to full text
+        for i, sent in enumerate(doc.sents):
+            if i < len(sentences) and i < tfidf_matrix.shape[0] - 1:
+                sentence_vector = tfidf_matrix[i:i+1]
+                similarity = cosine_similarity(sentence_vector, full_text_vector)[0][0]
+                
+                if similarity < 0.15:
+                    spans.append({
+                        "label": "TopicDrift",
+                        "start": sent.start_char,
+                        "end": sent.end_char,
+                        "text": sent.text
+                    })
     
-    # L2 normalize
-    norms = np.linalg.norm(tfidf_matrix, axis=1, keepdims=True) + 1e-12
-    tfidf_matrix = tfidf_matrix / norms
-    
-    # Get full text vector (last one)
-    full_text_vector = tfidf_matrix[-1:]
-    
-    # Compare each sentence to full text
-    for i, sent in enumerate(doc.sents):
-        if i < len(sentences):
-            sentence_vector = tfidf_matrix[i:i+1]
-            similarity = cosine_similarity(sentence_vector, full_text_vector)[0][0]
-            
-            if similarity < 0.15:
-                spans.append({
-                    "label": "TopicDrift",
-                    "start": sent.start_char,
-                    "end": sent.end_char,
-                    "text": sent.text
-                })
+    except Exception as e:
+        # If TF-IDF fails, skip topic drift detection
+        print(f"Topic drift detection failed: {e}")
+        return spans
     
     return spans
 
@@ -247,25 +266,50 @@ def annotate_passage(text: str) -> List[Dict[str, Any]]:
     [{ "label": "Subject|Predicate|Object|Hedging|TopicDrift|TooLong",
        "start": int, "end": int, "text": str }]
     """
-    if not text.strip():
+    if not text or not text.strip():
         return []
     
-    # Process with spaCy
-    doc = nlp(text)
+    try:
+        # Process with spaCy
+        doc = nlp(text)
+        
+        # Find all span types with error handling
+        all_spans = []
+        
+        try:
+            all_spans.extend(find_subject_object_spans(doc))
+        except Exception as e:
+            print(f"Subject/object detection failed: {e}")
+        
+        try:
+            all_spans.extend(find_predicate_spans(doc))
+        except Exception as e:
+            print(f"Predicate detection failed: {e}")
+        
+        try:
+            all_spans.extend(find_hedging_spans(text))
+        except Exception as e:
+            print(f"Hedging detection failed: {e}")
+        
+        try:
+            all_spans.extend(find_topic_drift_spans(doc))
+        except Exception as e:
+            print(f"Topic drift detection failed: {e}")
+        
+        try:
+            all_spans.extend(find_too_long_spans(doc))
+        except Exception as e:
+            print(f"Too long detection failed: {e}")
+        
+        # Remove overlaps
+        final_spans = deoverlap_spans(all_spans)
+        
+        # Remove text field for final output (keep only label, start, end)
+        return [{"label": s["label"], "start": s["start"], "end": s["end"]} for s in final_spans]
     
-    # Find all span types
-    all_spans = []
-    all_spans.extend(find_subject_object_spans(doc))
-    all_spans.extend(find_predicate_spans(doc))
-    all_spans.extend(find_hedging_spans(text))
-    all_spans.extend(find_topic_drift_spans(doc))
-    all_spans.extend(find_too_long_spans(doc))
-    
-    # Remove overlaps
-    final_spans = deoverlap_spans(all_spans)
-    
-    # Remove text field for final output (keep only label, start, end)
-    return [{"label": s["label"], "start": s["start"], "end": s["end"]} for s in final_spans]
+    except Exception as e:
+        print(f"Text analysis failed: {e}")
+        return []
 
 def render_html(text: str, spans: List[Dict[str, Any]]) -> str:
     """Render HTML with span wrappers and CSS classes."""
