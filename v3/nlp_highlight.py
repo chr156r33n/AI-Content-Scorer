@@ -233,7 +233,7 @@ def find_too_long_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
     return spans
 
 def deoverlap_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Remove overlapping spans, keeping highest priority ones, but allow predicate-hedging overlaps."""
+    """Remove overlapping spans, but allow semantic spans to coexist with TooLong spans."""
     if not spans:
         return spans
     
@@ -253,10 +253,17 @@ def deoverlap_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     (span["label"] == "Hedging" and existing["label"] == "Predicate")):
                     # Allow this overlap
                     continue
-                else:
-                    # Normal overlap - use priority
-                    overlaps = True
-                    break
+                
+                # Allow semantic spans (Subject, Predicate, Object, Hedging) to coexist with TooLong
+                semantic_spans = {"Subject", "Predicate", "Object", "Hedging"}
+                if ((span["label"] in semantic_spans and existing["label"] == "TooLong") or
+                    (span["label"] == "TooLong" and existing["label"] in semantic_spans)):
+                    # Allow this overlap - semantic analysis can coexist with length warnings
+                    continue
+                
+                # Normal overlap - use priority
+                overlaps = True
+                break
         
         if not overlaps:
             result.append(span)
