@@ -537,6 +537,24 @@ def render_html(text: str, spans: List[Dict[str, Any]]) -> str:
 
         classes = " ".join([f"hl-{lbl}" for lbl in unique_labels])
         roles_attr = ",".join(unique_labels)
-        result_parts.append(f'<span class="{classes}" data-roles="{roles_attr}">{seg_text}</span>')
+        
+        # Build stacked underline using inset box-shadows for semantic labels
+        semantic_order = ["Subject", "Predicate", "Object", "Hedging", "TopicDrift"]
+        semantic_colors = {
+            "Subject": "#22c55e",
+            "Predicate": "#06b6d4",
+            "Object": "#a855f7",
+            "Hedging": "#f59e0b",
+            "TopicDrift": "#3b82f6",
+        }
+        present_semantics = [lbl for lbl in semantic_order if lbl in unique_labels]
+        box_shadows: List[str] = []
+        for idx, lbl in enumerate(present_semantics):
+            offset = (idx + 1) * 2
+            color = semantic_colors.get(lbl, "#000000")
+            box_shadows.append(f"inset 0 -{offset}px 0 0 {color}")
+        style_attr = f' style="box-shadow: {", ".join(box_shadows)};"' if box_shadows else ""
+
+        result_parts.append(f'<span class="{classes}" data-roles="{roles_attr}"{style_attr}>{seg_text}</span>')
 
     return "".join(result_parts)

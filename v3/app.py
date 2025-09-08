@@ -62,40 +62,24 @@ def main():
     # Add CSS styles
     st.markdown("""
     <style>
-    .hl-Subject {
-        background: #22c55e33;
-        border-radius: 2px;
-        padding: 1px 2px;
+    /* Semantic labels now use stacked underlines computed inline via box-shadow.
+       Keep classes for legend mapping; avoid background fills to prevent clutter. */
+    .hl-Subject, .hl-Predicate, .hl-Object, .hl-Hedging, .hl-TopicDrift {
+        background: transparent;
     }
-    .hl-Predicate {
-        background: #06b6d433;
-        border-radius: 2px;
-        padding: 1px 2px;
-    }
-    .hl-Object {
-        background: #a855f733;
-        border-radius: 2px;
-        padding: 1px 2px;
-    }
-    .hl-Hedging {
-        background: #f59e0b33;
-        border-radius: 2px;
-        padding: 1px 2px;
-    }
-    .hl-TopicDrift {
-        background: #3b82f633;
-        border-radius: 2px;
-        padding: 1px 2px;
-    }
+
+    /* Warnings use subtle background / left border */
     .hl-TooLong {
-        background: #ef444433;
+        background: rgba(239, 68, 68, 0.12);
         border-radius: 2px;
-        padding: 1px 2px;
     }
     .hl-TooComplex {
-        background: #ec489933;
-        border-radius: 2px;
-        padding: 1px 2px;
+        border-left: 3px solid rgba(236, 72, 153, 0.6);
+        padding-left: 2px;
+    }
+    /* Improve readability with slight spacing between words when many effects stack */
+    .hl-Subject, .hl-Predicate, .hl-Object, .hl-Hedging, .hl-TopicDrift, .hl-TooLong, .hl-TooComplex {
+        text-decoration: none;
     }
     </style>
     """, unsafe_allow_html=True)
