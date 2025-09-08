@@ -27,6 +27,10 @@ def main() -> None:
 
     html = render_html(TEST_PASSAGE, spans)
     multi_class_segments = len(re.findall(r'data-roles="[^"]*,[^"]*"', html))
+    # Strip tags to verify no duplication or omissions
+    stripped = re.sub(r"</span>", "", html)
+    stripped = re.sub(r"<span[^>]*>", "", stripped)
+    matches_original = (stripped == TEST_PASSAGE)
 
     print("Total spans:", len(spans))
     print("Counts:")
@@ -34,6 +38,15 @@ def main() -> None:
         print(f"  {label}: {counts.get(label, 0)}")
     print("Overlapping span pairs (different labels):", overlap_pairs)
     print("Segments with multiple roles in HTML:", multi_class_segments)
+    print("Stripped HTML equals original:", matches_original)
+    if not matches_original:
+        max_len = min(len(stripped), len(TEST_PASSAGE))
+        idx = 0
+        while idx < max_len and stripped[idx] == TEST_PASSAGE[idx]:
+            idx += 1
+        print("First diff at index:", idx)
+        print("Around diff (rendered):", stripped[max(0, idx-40): idx+40].replace("\n", "\\n"))
+        print("Around diff (original):", TEST_PASSAGE[max(0, idx-40): idx+40].replace("\n", "\\n"))
     print("HTML preview:")
     print(html[:600])
 
