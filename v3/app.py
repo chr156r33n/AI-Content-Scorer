@@ -161,6 +161,19 @@ def main():
     .hl-Subject, .hl-Predicate, .hl-Object, .hl-Hedging, .hl-TopicDrift, .hl-TooLong, .hl-TooComplex {
         text-decoration: none;
     }
+
+    /* Dark mode contrast adjustments */
+    @media (prefers-color-scheme: dark) {
+        .hl-Subject, .hl-Predicate, .hl-Object, .hl-Hedging, .hl-TopicDrift {
+            text-shadow: 0 0 2px rgba(255, 255, 255, 0.35);
+        }
+        .hl-TooLong {
+            background: rgba(239, 68, 68, 0.24);
+        }
+        .hl-TooComplex {
+            border-left: 3px solid rgba(236, 72, 153, 0.85);
+        }
+    }
     </style>
     """, unsafe_allow_html=True)
     
