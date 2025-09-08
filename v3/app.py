@@ -5,7 +5,7 @@ import textstat
 import re
 from typing import List, Dict, Tuple, Any
 import json
-from nlp_highlight import annotate_passage, render_html
+from nlp_highlight import annotate_passage
 
 # Page configuration
 st.set_page_config(
@@ -19,6 +19,84 @@ st.set_page_config(
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = None
 
+def _safe_render_html(text: str, spans: List[Dict[str, Any]]) -> str:
+    """Render HTML with overlap-safe segmentation and stacked styles.
+
+    Ensures no text duplication by splitting into minimal segments and
+    applying multiple roles via classes and inline box-shadows.
+    """
+    if not spans:
+        return text
+
+    # Normalize spans within bounds
+    norm_spans: List[Dict[str, Any]] = []
+    for s in spans:
+        start = max(0, min(len(text), s.get('start', 0)))
+        end = max(start, min(len(text), s.get('end', start)))
+        label = s.get('label', '')
+        if start < end and label:
+            norm_spans.append({'start': start, 'end': end, 'label': label})
+
+    if not norm_spans:
+        return text
+
+    # Boundaries
+    bounds = {0, len(text)}
+    for s in norm_spans:
+        bounds.add(s['start'])
+        bounds.add(s['end'])
+    sorted_bounds = sorted(bounds)
+
+    # Build segments and covering labels
+    segments: List[Tuple[int, int, List[str]]] = []
+    for i in range(len(sorted_bounds) - 1):
+        a = sorted_bounds[i]
+        b = sorted_bounds[i + 1]
+        if a >= b:
+            continue
+        labels: List[str] = []
+        for s in norm_spans:
+            if s['start'] <= a and s['end'] >= b:
+                labels.append(s['label'])
+        segments.append((a, b, labels))
+
+    # Inline stacked underline colors for semantics
+    semantic_order = ["Subject", "Predicate", "Object", "Hedging", "TopicDrift"]
+    semantic_colors = {
+        "Subject": "#22c55e",
+        "Predicate": "#06b6d4",
+        "Object": "#a855f7",
+        "Hedging": "#f59e0b",
+        "TopicDrift": "#3b82f6",
+    }
+
+    parts: List[str] = []
+    for a, b, labels in segments:
+        seg_text = text[a:b]
+        if not labels:
+            parts.append(seg_text)
+            continue
+        # Deduplicate labels preserving order
+        seen = set()
+        uniq: List[str] = []
+        for lbl in labels:
+            if lbl not in seen:
+                seen.add(lbl)
+                uniq.append(lbl)
+        classes = " ".join([f"hl-{lbl}" for lbl in uniq])
+        roles = ",".join(uniq)
+
+        present_semantics = [lbl for lbl in semantic_order if lbl in uniq]
+        box_shadows: List[str] = []
+        for idx, lbl in enumerate(present_semantics):
+            offset = (idx + 1) * 2
+            color = semantic_colors.get(lbl, "#000000")
+            box_shadows.append(f"inset 0 -{offset}px 0 0 {color}")
+        style_attr = f' style="box-shadow: {", ".join(box_shadows)};"' if box_shadows else ""
+        parts.append(f'<span class="{classes}" data-roles="{roles}"{style_attr}>{seg_text}</span>')
+
+    return "".join(parts)
+
 def analyze_text(text: str) -> Dict[str, Any]:
     """Analyze text using the new NLP highlighting module."""
     try:
@@ -31,8 +109,8 @@ def analyze_text(text: str) -> Dict[str, Any]:
             label = span["label"]
             span_counts[label] = span_counts.get(label, 0) + 1
         
-        # Generate HTML with highlighting
-        highlighted_html = render_html(text, spans)
+        # Generate HTML with highlighting using safe renderer to avoid duplication
+        highlighted_html = _safe_render_html(text, spans)
         
         return {
             'spans': spans,
