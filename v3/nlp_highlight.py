@@ -40,24 +40,74 @@ def get_noun_chunks(doc: spacy.tokens.Doc) -> List[spacy.tokens.Span]:
 def find_subject_object_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
     """Find subject and object spans using noun chunks and individual tokens."""
     spans = []
+    seen_keys = set()
+    
+    def add_span(label: str, start: int, end: int, text: str) -> None:
+        key = (label, start, end)
+        if start < end and key not in seen_keys:
+            spans.append({
+                "label": label,
+                "start": start,
+                "end": end,
+                "text": text
+            })
+            seen_keys.add(key)
+
+    def expand_noun_phrase_for_token(token: spacy.tokens.Token) -> Tuple[int, int]:
+        # Expand left for determiners, possessives, adjectives, numbers, compounds
+        start_token = token
+        end_token = token
+        # Left expansion
+        for i in range(token.i - 1, token.sent.start - 1, -1):
+            t = token.doc[i]
+            if t.head == start_token and t.dep_ in ["det", "poss", "amod", "nummod", "compound"]:
+                start_token = t
+            else:
+                break
+        # Right expansion
+        for i in range(token.i + 1, token.sent.end):
+            t = token.doc[i]
+            if t.head == end_token and t.dep_ in ["compound", "amod"]:
+                end_token = t
+            else:
+                break
+        return start_token.idx, end_token.idx + len(end_token.text)
     noun_chunks = get_noun_chunks(doc)
     
     for sent in doc.sents:
-        # Find the root verb
+        # Predicate heads to relate subjects/objects to
         root = sent.root
-        if root.pos_ != "VERB":
-            continue
+        predicate_heads = []
+        if root.pos_ in ["VERB", "AUX"]:
+            predicate_heads.append(root)
+        else:
+            # Copular predicate support: include cop child as predicate head
+            for t in sent:
+                if t.dep_ == "cop":
+                    predicate_heads.append(t)
+        # Include xcomp/ccomp/conj chains under root
+        to_visit = list(predicate_heads)
+        visited = set()
+        while to_visit:
+            h = to_visit.pop()
+            if h in visited:
+                continue
+            visited.add(h)
+            for child in h.children:
+                if child.dep_ in ["xcomp", "ccomp", "conj"] and child.pos_ in ["VERB", "AUX"]:
+                    predicate_heads.append(child)
+                    to_visit.append(child)
             
-        # Find subject and object spans
+        # Find subject and object spans (prefer noun chunks, then token-level fallback)
         subject_span = None
         object_span = None
         
         # First try noun chunks
         for chunk in noun_chunks:
             if chunk.sent == sent:  # Only consider chunks in this sentence
-                # Check if any token in the chunk is a subject of the root
+                # Check if any token in the chunk is a subject of any predicate head
                 for token in chunk:
-                    if token.dep_ in ["nsubj", "nsubjpass"] and token.head == root:
+                    if token.dep_ in ["nsubj", "nsubjpass"] and token.head in predicate_heads:
                         subject_span = {
                             "start": chunk.start_char,
                             "end": chunk.end_char,
@@ -65,11 +115,11 @@ def find_subject_object_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
                         }
                         break
                 
-                # Check if any token in the chunk is an object of the root
+                # Check if any token in the chunk is an object of any predicate head
                 if not object_span:  # Only find first object
                     for token in chunk:
                         # Check for direct objects
-                        if token.dep_ in ["dobj", "attr", "obj"] and token.head == root:
+                        if token.dep_ in ["dobj", "attr", "obj"] and token.head in predicate_heads:
                             object_span = {
                                 "start": chunk.start_char,
                                 "end": chunk.end_char,
@@ -77,7 +127,7 @@ def find_subject_object_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
                             }
                             break
                         # Check for prepositional objects (objects of prepositions that are children of the root)
-                        elif token.dep_ == "pobj" and token.head.head == root:
+                        elif token.dep_ == "pobj" and token.head.head in predicate_heads:
                             object_span = {
                                 "start": chunk.start_char,
                                 "end": chunk.end_char,
@@ -89,79 +139,39 @@ def find_subject_object_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
         if not object_span:
             for token in sent:
                 # Check for direct objects
-                if token.dep_ in ["dobj", "attr", "obj"] and token.head == root:
+                if token.dep_ in ["dobj", "attr", "obj"] and token.head in predicate_heads:
                     # Try to find the full noun phrase including determiners
-                    start_token = token
-                    end_token = token
-                    
-                    # Look backwards for determiners, adjectives
-                    for i in range(token.i - 1, sent.start - 1, -1):
-                        prev_token = doc[i]
-                        if prev_token.pos_ in ["DET", "ADJ", "NUM"] and prev_token.head == token:
-                            start_token = prev_token
-                        else:
-                            break
-                    
-                    # Look forwards for adjectives, nouns
-                    for i in range(token.i + 1, sent.end):
-                        next_token = doc[i]
-                        if next_token.pos_ in ["ADJ", "NOUN", "PROPN"] and next_token.head == token:
-                            end_token = next_token
-                        else:
-                            break
-                    
+                    s, e = expand_noun_phrase_for_token(token)
                     object_span = {
-                        "start": start_token.idx,
-                        "end": end_token.idx + len(end_token.text),
-                        "text": doc[start_token.idx:end_token.idx + len(end_token.text)].text
+                        "start": s,
+                        "end": e,
+                        "text": doc[s:e].text
                     }
                     break
                 # Check for prepositional objects
-                elif token.dep_ == "pobj" and token.head.head == root:
-                    # Similar logic for prepositional objects
-                    start_token = token
-                    end_token = token
-                    
-                    # Look backwards for determiners, adjectives
-                    for i in range(token.i - 1, sent.start - 1, -1):
-                        prev_token = doc[i]
-                        if prev_token.pos_ in ["DET", "ADJ", "NUM"] and prev_token.head == token:
-                            start_token = prev_token
-                        else:
-                            break
-                    
-                    # Look forwards for adjectives, nouns
-                    for i in range(token.i + 1, sent.end):
-                        next_token = doc[i]
-                        if next_token.pos_ in ["ADJ", "NOUN", "PROPN"] and next_token.head == token:
-                            end_token = next_token
-                        else:
-                            break
-                    
+                elif token.dep_ == "pobj" and token.head.head in predicate_heads:
+                    s, e = expand_noun_phrase_for_token(token)
                     object_span = {
-                        "start": start_token.idx,
-                        "end": end_token.idx + len(end_token.text),
-                        "text": doc[start_token.idx:end_token.idx + len(end_token.text)].text
+                        "start": s,
+                        "end": e,
+                        "text": doc[s:e].text
                     }
+                    break
+        
+        # Token-level fallback for subject if not found by chunks
+        if not subject_span:
+            for token in sent:
+                if token.dep_ in ["nsubj", "nsubjpass"] and (token.head in predicate_heads or True):
+                    s, e = expand_noun_phrase_for_token(token)
+                    subject_span = {"start": s, "end": e, "text": doc[s:e].text}
                     break
         
         # Add subject span
         if subject_span:
-            spans.append({
-                "label": "Subject",
-                "start": subject_span["start"],
-                "end": subject_span["end"],
-                "text": subject_span["text"]
-            })
-        
+            add_span("Subject", subject_span["start"], subject_span["end"], subject_span["text"])
         # Add object span
         if object_span:
-            spans.append({
-                "label": "Object", 
-                "start": object_span["start"],
-                "end": object_span["end"],
-                "text": object_span["text"]
-            })
+            add_span("Object", object_span["start"], object_span["end"], object_span["text"])
     
     return spans
 
@@ -171,36 +181,49 @@ def find_predicate_spans(doc: spacy.tokens.Doc) -> List[Dict[str, Any]]:
     
     for sent in doc.sents:
         root = sent.root
-        if root.pos_ != "VERB":
-            continue
-        
-        # Start with root verb
-        predicate_tokens = [root]
-        
-        # Find auxiliary verbs that are children of the root
-        for token in sent:
-            if (token.dep_ in ["aux", "auxpass"] and 
-                token.head == root and 
-                token.pos_ == "AUX" and
-                token.i < root.i):  # Only auxiliaries before the root
-                predicate_tokens.append(token)
-        
-        # Find adverbial modifiers of the verb
-        for token in sent:
-            if (token.dep_ in ["advmod", "neg"] and 
-                token.head == root and
-                token.pos_ in ["ADV", "PART"]):
-                predicate_tokens.append(token)
-        
-        # Sort tokens by position
-        predicate_tokens.sort(key=lambda t: t.i)
-        
-        # Create span from first to last token
+        predicate_heads: List[spacy.tokens.Token] = []
+        if root.pos_ in ["VERB", "AUX"]:
+            predicate_heads.append(root)
+        else:
+            # Copular: add the cop child as predicate head
+            for t in sent:
+                if t.dep_ == "cop":
+                    predicate_heads.append(t)
+
+        # Include xcomp/ccomp/conj chains
+        to_visit = list(predicate_heads)
+        visited = set()
+        while to_visit:
+            h = to_visit.pop()
+            if h in visited:
+                continue
+            visited.add(h)
+            for child in h.children:
+                if child.dep_ in ["xcomp", "ccomp", "conj"] and child.pos_ in ["VERB", "AUX"]:
+                    predicate_heads.append(child)
+                    to_visit.append(child)
+
+        predicate_tokens: List[spacy.tokens.Token] = []
+        for head in predicate_heads:
+            predicate_tokens.append(head)
+            for token in sent:
+                if token.head == head:
+                    if token.dep_ in ["aux", "auxpass"] and token.pos_ in ["AUX", "VERB"]:
+                        predicate_tokens.append(token)
+                    elif token.dep_ in ["advmod", "neg"] and token.pos_ in ["ADV", "PART"]:
+                        predicate_tokens.append(token)
+                    elif token.dep_ == "mark" and token.text.lower() == "to":
+                        predicate_tokens.append(token)
+                    elif token.dep_ == "prt":
+                        predicate_tokens.append(token)
+
+        # Unique tokens and sort
+        predicate_tokens = sorted(set(predicate_tokens), key=lambda t: t.i)
+
         if predicate_tokens:
-            start_idx = min(token.i for token in predicate_tokens)
-            end_idx = max(token.i for token in predicate_tokens) + 1
-            p_span = sent.doc[start_idx : end_idx]
-            
+            start_idx = predicate_tokens[0].i
+            end_idx = predicate_tokens[-1].i + 1
+            p_span = sent.doc[start_idx:end_idx]
             spans.append({
                 "label": "Predicate",
                 "start": p_span.start_char,
