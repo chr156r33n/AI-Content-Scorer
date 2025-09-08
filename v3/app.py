@@ -92,6 +92,11 @@ def main():
         border-radius: 2px;
         padding: 1px 2px;
     }
+    .hl-TooComplex {
+        background: #ec489933;
+        border-radius: 2px;
+        padding: 1px 2px;
+    }
     </style>
     """, unsafe_allow_html=True)
     
@@ -129,6 +134,7 @@ def main():
             st.metric("Hedging instances", span_counts.get('Hedging', 0))
             st.metric("Topic drift", span_counts.get('TopicDrift', 0))
             st.metric("Too long", span_counts.get('TooLong', 0))
+            st.metric("Too complex", span_counts.get('TooComplex', 0))
             
             # Readability metrics
             readability = calculate_readability_metrics(text_input)
@@ -150,6 +156,7 @@ def main():
         - 🟡 **Hedging** - Amber
         - 🔵 **Topic Drift** - Blue
         - 🔴 **Too Long** - Red
+        - 🟠 **Too Complex** - Orange
         """)
         
         results = st.session_state.analysis_results

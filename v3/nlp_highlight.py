@@ -470,45 +470,73 @@ def annotate_passage(text: str) -> List[Dict[str, Any]]:
         except Exception as e:
             print(f"Too complex detection failed: {e}")
         
-        # Remove overlaps
-        final_spans = deoverlap_spans(all_spans)
-        
+        # Keep all spans (allow overlaps). Sort by start, then end for stability.
+        all_spans_sorted = sorted(all_spans, key=lambda s: (s["start"], s["end"]))
+
         # Remove text field for final output (keep only label, start, end)
-        return [{"label": s["label"], "start": s["start"], "end": s["end"]} for s in final_spans]
+        return [{"label": s["label"], "start": s["start"], "end": s["end"]} for s in all_spans_sorted]
     
     except Exception as e:
         print(f"Text analysis failed: {e}")
         return []
 
 def render_html(text: str, spans: List[Dict[str, Any]]) -> str:
-    """Render HTML with span wrappers and CSS classes."""
+    """Render HTML with support for overlapping spans via segmentation.
+
+    We split the text into minimal non-overlapping segments by all span boundaries.
+    Each segment is wrapped once, with all covering labels applied as multiple CSS classes.
+    """
     if not spans:
         return text
-    
-    # Sort spans by start position
-    spans = sorted(spans, key=lambda s: s["start"])
-    
-    result = []
-    last_end = 0
-    
-    for span in spans:
-        start = span["start"]
-        end = span["end"]
-        label = span["label"]
-        
-        # Add text before this span
-        if start > last_end:
-            result.append(text[last_end:start])
-        
-        # Add the span with CSS class
-        span_text = text[start:end]
-        css_class = f"hl-{label}"
-        result.append(f'<span class="{css_class}" data-role="{label}">{span_text}</span>')
-        
-        last_end = end
-    
-    # Add remaining text
-    if last_end < len(text):
-        result.append(text[last_end:])
-    
-    return "".join(result)
+
+    # Normalize and sort spans
+    normalized_spans = []
+    for s in spans:
+        start = max(0, min(len(text), s.get("start", 0)))
+        end = max(start, min(len(text), s.get("end", start)))
+        if start < end:
+            normalized_spans.append({"start": start, "end": end, "label": s.get("label", "")})
+
+    if not normalized_spans:
+        return text
+
+    # Collect all boundaries
+    boundaries = set([0, len(text)])
+    for s in normalized_spans:
+        boundaries.add(s["start"]) 
+        boundaries.add(s["end"])
+    sorted_bounds = sorted(boundaries)
+
+    # Build intervals between boundaries
+    segments = []  # (seg_start, seg_end, [labels])
+    for i in range(len(sorted_bounds) - 1):
+        seg_start = sorted_bounds[i]
+        seg_end = sorted_bounds[i + 1]
+        if seg_start >= seg_end:
+            continue
+        covering_labels = []
+        for s in normalized_spans:
+            if s["start"] <= seg_start and s["end"] >= seg_end:
+                covering_labels.append(s["label"])
+        segments.append((seg_start, seg_end, covering_labels))
+
+    # Render by segments
+    result_parts: List[str] = []
+    for seg_start, seg_end, labels in segments:
+        seg_text = text[seg_start:seg_end]
+        if not labels:
+            result_parts.append(seg_text)
+            continue
+        # Deduplicate labels while preserving order
+        seen = set()
+        unique_labels = []
+        for lbl in labels:
+            if lbl not in seen:
+                seen.add(lbl)
+                unique_labels.append(lbl)
+
+        classes = " ".join([f"hl-{lbl}" for lbl in unique_labels])
+        roles_attr = ",".join(unique_labels)
+        result_parts.append(f'<span class="{classes}" data-roles="{roles_attr}">{seg_text}</span>')
+
+    return "".join(result_parts)
