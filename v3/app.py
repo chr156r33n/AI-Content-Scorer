@@ -10,7 +10,8 @@ from nlp_highlight import annotate_passage, render_html
 st.set_page_config(
     page_title="Text Analysis App",
     page_icon="📝",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # Initialize session state
