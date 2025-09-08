@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import textstat
+import re
 from typing import List, Dict, Tuple, Any
 import json
 from nlp_highlight import annotate_passage, render_html
@@ -148,6 +149,11 @@ def main():
         
         # Display highlighted text
         st.markdown(results['highlighted_html'], unsafe_allow_html=True)
+        # Integrity check: ensure no duplication/omission in rendered HTML
+        stripped = re.sub(r"</span>", "", results['highlighted_html'])
+        stripped = re.sub(r"<span[^>]*>", "", stripped)
+        if stripped != results['text']:
+            st.warning("Rendering integrity check failed: displayed text may contain duplication or omissions. Please hard refresh.")
         
         # Detailed results
         with st.expander("📋 Detailed Results"):
