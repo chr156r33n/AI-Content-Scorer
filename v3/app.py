@@ -152,6 +152,7 @@ def main():
     .hl-TooLong {
         background: rgba(239, 68, 68, 0.12);
         border-radius: 2px;
+        border: 2px dotted rgba(239, 68, 68, 0.8);
     }
     .hl-TooComplex {
         border-left: 3px solid rgba(236, 72, 153, 0.6);
