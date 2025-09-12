@@ -152,6 +152,8 @@ def main():
     .hl-TooLong {
         background: rgba(239, 68, 68, 0.12);
         border-radius: 2px;
+        outline: 2px dotted rgba(239, 68, 68, 0.8);
+        outline-offset: 2px; /* keep clear of stacked underline box-shadows */
     }
     .hl-TooComplex {
         border-left: 3px solid rgba(236, 72, 153, 0.6);
